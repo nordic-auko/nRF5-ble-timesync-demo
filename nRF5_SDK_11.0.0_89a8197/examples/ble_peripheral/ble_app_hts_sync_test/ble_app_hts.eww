@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<workspace>
+  <project>
+    <path>$WS_DIR$\pca10028\s130\iar\ble_app_hts_s130_pca10028.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10040\s132\iar\ble_app_hts_s132_pca10040.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10036\s132\iar\ble_app_hts_s132_pca10036.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10040\ser_s132_spi\iar\ble_app_hts_s132_spi_pca10040.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10028\ser_s130_hci\iar\ble_app_hts_s130_hci_pca10028.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10028\ser_s130_spi\iar\ble_app_hts_s130_spi_pca10028.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10040\ser_s132_hci\iar\ble_app_hts_s132_hci_pca10040.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10028\ser_s130_uart\iar\ble_app_hts_s130_uart_pca10028.ewp</path>
+  </project>
+  <project>
+    <path>$WS_DIR$\pca10040\ser_s132_uart\iar\ble_app_hts_s132_uart_pca10040.ewp</path>
+  </project>
+  <batchBuild/>
+</workspace>
