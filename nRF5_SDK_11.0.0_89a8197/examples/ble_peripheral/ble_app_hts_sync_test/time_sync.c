@@ -12,11 +12,11 @@
 #include "nrf_sdm.h"
 
 #if   defined ( __CC_ARM )
-#define TX_CHAIN_DELAY_PRESCALER_0 1075
+#define TX_CHAIN_DELAY_PRESCALER_0 1080
 #elif defined ( __ICCARM__ )
 #define TX_CHAIN_DELAY_PRESCALER_0 1084
 #elif defined ( __GNUC__ )
-#define TX_CHAIN_DELAY_PRESCALER_0 1084
+#define TX_CHAIN_DELAY_PRESCALER_0 1085
 #endif
 
 #define SYNC_TIMER_PRESCALER 0
@@ -207,9 +207,11 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
             }
             else if (!m_send_sync_pkt)
             {
-                // Return with normal action request
-                m_timeslot_req_normal.params.normal.distance_us = m_total_timeslot_length + m_timeslot_distance;
-                return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_normal;
+                // Don't do anything. Timeslot will end and new one requested upon the next timer0 compare. 
+                
+//                // Return with normal action request
+//                m_timeslot_req_normal.params.normal.distance_us = m_total_timeslot_length + m_timeslot_distance;
+//                return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_normal;
             }
         }
         
@@ -286,7 +288,6 @@ static void update_radio_parameters()
     NRF_RADIO->INTENSET = RADIO_INTENSET_END_Msk;
     
     NVIC_EnableIRQ(RADIO_IRQn);
-    
 }
 
 /**@brief IRQHandler used for execution context management. 
@@ -355,6 +356,9 @@ void timeslot_begin_handler(void)
     ppi_chn2 = m_params.ppi_chns[1];
     
     // Use PPI to create fixed offset between timer capture and packet transmission
+    // Compare event #0: Capture timer value for free running timer
+    // Compare event #1: Trigger radio transmission
+    
     NRF_PPI->CH[ppi_chn].EEP = (uint32_t) &m_params.high_freq_timer[1]->EVENTS_COMPARE[0];
     NRF_PPI->CH[ppi_chn].TEP = (uint32_t) &m_params.high_freq_timer[0]->TASKS_CAPTURE[1];
     NRF_PPI->CHENSET         = (1 << ppi_chn);
@@ -374,9 +378,6 @@ void timeslot_begin_handler(void)
     m_params.high_freq_timer[1]->EVENTS_COMPARE[0] = 0;
     m_params.high_freq_timer[1]->EVENTS_COMPARE[1] = 0;
     
-    
-    
-
     NRF_RADIO->SHORTS                        = RADIO_SHORTS_END_DISABLE_Msk;
     NRF_RADIO->TASKS_TXEN                    = 1;
     m_params.high_freq_timer[1]->TASKS_START = 1;
@@ -487,19 +488,26 @@ static inline void sync_timer_offset_compensate(void)
     chn1 = m_params.ppi_chns[1];
     chg  = m_params.ppi_chhg;
     
+    // Use a timer compare register to reset the timer according to the offset value
+    
+    // PPI channel 0: clear timer when offset value is reached
     NRF_PPI->CHENCLR      = (1 << chn0);
     NRF_PPI->CH[chn0].EEP = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
     NRF_PPI->CH[chn0].TEP = (uint32_t) &m_params.high_freq_timer[0]->TASKS_CLEAR;
     
+    // PPI channel 1: disable PPI channel 0 such that the timer is only reset once. 
     NRF_PPI->CHENCLR      = (1 << chn1);
     NRF_PPI->CH[chn1].EEP = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
     NRF_PPI->CH[chn1].TEP = (uint32_t) &NRF_PPI->TASKS_CHG[chg].DIS;
     
+    // Use PPI group for PPI channel 0 disabling
     NRF_PPI->TASKS_CHG[chg].DIS = 1;
     NRF_PPI->CHG[chg]           = (1 << chn0);
     
+    // Write offset to timer compare register
     m_params.high_freq_timer[0]->CC[2] = (TIMER_MAX_VAL - timer_offset);
     
+    // Enable PPI channels
     NRF_PPI->CHENSET = (1 << chn0) | (1 << chn1);
 }
 
