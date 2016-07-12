@@ -96,7 +96,7 @@ def parse_vcd(filename):
             i1     += 1
     
     diffs = np.zeros(flips)
-    freq  = 1000000000
+    freq  = 1000000000.0
     
     for i in xrange(0, flips):
         diff = abs(ch0[i]-ch1[i])
@@ -109,7 +109,7 @@ def parse_vcd(filename):
         else:
             diffs[i] = diff
     
-    return diffs, freq, ch0[-1], ch1[-1]
+    return diffs, freq, ch0[-1] - ch0[0], ch1[-1] - ch1[0]
     
 if len(sys.argv) < 2:
     print "Usage: python " + sys.argv[0] + " trace.mat/vcd"
@@ -128,8 +128,17 @@ print str(len(diffs)) + " toggles found within sanity range"
 print "Total time in channel 0: " + str((time0 / freq)) + " s"
 print "Total time in channel 1: " + str((time1 / freq)) + " s"
 
+max_val = 0
+max_idx = 0
+for i in xrange(0, len(diffs)):
+    if diffs[i] > max_val:
+        max_val = diffs[i]
+        max_idx = i
+
+print "Largest difference: " + str((max_val / freq) * 1000000000.0) + " ns at toggle #" + str(max_idx) + " (" + str(max_idx * (65536.0 / 16000000.0)) + " seconds)"
+
 mean = (np.mean(diffs) / freq) * 1000000000.0
 std  = (np.std(diffs) / freq) * 1000000000.0
 
-print "Mean value across " + str(len((diffs))) + " toggles = " + str(mean) + " ns"
+print "Mean difference across " + str(len((diffs))) + " toggles = " + str(mean) + " ns"
 print "Standard deviation across " + str(len((diffs))) + " toggles = " + str(std) + " ns"
