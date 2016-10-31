@@ -12,11 +12,11 @@
 #include "nrf_sdm.h"
 
 #if   defined ( __CC_ARM )
-#define TX_CHAIN_DELAY_PRESCALER_0 1080
+#define TX_CHAIN_DELAY_PRESCALER_0 699
 #elif defined ( __ICCARM__ )
-#define TX_CHAIN_DELAY_PRESCALER_0 1084
+#define TX_CHAIN_DELAY_PRESCALER_0 703
 #elif defined ( __GNUC__ )
-#define TX_CHAIN_DELAY_PRESCALER_0 1085
+#define TX_CHAIN_DELAY_PRESCALER_0 704
 #endif
 
 #define SYNC_TIMER_PRESCALER 0
@@ -37,15 +37,17 @@
 
 #define MAIN_DEBUG                           0x12345678UL
 
-#define TIMER_MAX_VAL (65536 - 1)
-#define RTC_MAX_VAL   (16777216 - 1)
+#define TIMER_MAX_VAL (0xFFFF)
+#define RTC_MAX_VAL   (0xFFFFFF)
 
 static volatile bool m_timeslot_session_open;
 volatile uint32_t    m_blocked_cancelled_count;
 static uint32_t      m_total_timeslot_length = 0;
 static uint32_t      m_timeslot_distance = 0;
+static uint32_t      m_ppi_chen_mask = 0;
 static ts_params_t   m_params;
 static volatile bool m_send_sync_pkt = false;
+static volatile bool m_timer_update_in_progress = false;
 
 volatile uint32_t m_test_count = 0;
 volatile uint32_t m_rcv_count = 0;
@@ -253,14 +255,14 @@ static void update_radio_parameters()
     NRF_RADIO->TXPOWER   = RADIO_TXPOWER_TXPOWER_0dBm   << RADIO_TXPOWER_TXPOWER_Pos;
     
     // RF bitrate
-    NRF_RADIO->MODE      = RADIO_MODE_MODE_Ble_1Mbit        << RADIO_MODE_MODE_Pos;
+    NRF_RADIO->MODE      = RADIO_MODE_MODE_Nrf_2Mbit       << RADIO_MODE_MODE_Pos;
     
     // Fast startup mode
     NRF_RADIO->MODECNF0 = RADIO_MODECNF0_RU_Fast << RADIO_MODECNF0_RU_Pos;
     
     // CRC configuration
-    NRF_RADIO->CRCCNF    = RADIO_CRCCNF_LEN_Two << RADIO_CRCCNF_LEN_Pos; 
-    NRF_RADIO->CRCINIT = 0xFFFFUL;      // Initial value      
+    NRF_RADIO->CRCCNF    = RADIO_CRCCNF_LEN_Three << RADIO_CRCCNF_LEN_Pos; 
+    NRF_RADIO->CRCINIT = 0xFFFFFFUL;      // Initial value      
     NRF_RADIO->CRCPOLY = 0x11021UL;     // CRC poly: x^16+x^12^x^5+1
     
     // Packet format 
@@ -372,8 +374,8 @@ void timeslot_begin_handler(void)
     m_params.high_freq_timer[1]->SHORTS      = TIMER_SHORTS_COMPARE1_STOP_Msk | TIMER_SHORTS_COMPARE1_CLEAR_Msk;
     m_params.high_freq_timer[1]->TASKS_STOP  = 1;
     m_params.high_freq_timer[1]->TASKS_CLEAR = 1;
-    m_params.high_freq_timer[1]->CC[0]       = 40; // Matches 40 us radio rampup time
-    m_params.high_freq_timer[1]->CC[1]       = 50; // Margin for timer readout
+    m_params.high_freq_timer[1]->CC[0]       = 45; // Matches 40 us radio rampup time
+    m_params.high_freq_timer[1]->CC[1]       = 60; // Margin for timer readout
     
     m_params.high_freq_timer[1]->EVENTS_COMPARE[0] = 0;
     m_params.high_freq_timer[1]->EVENTS_COMPARE[1] = 0;
@@ -457,12 +459,29 @@ static void sync_timer_start(void)
     m_params.high_freq_timer[0]->TASKS_START = 1;
 }
 
+void SWI3_EGU3_IRQHandler(void)
+{
+    if (NRF_EGU3->EVENTS_TRIGGERED[0] != 0)
+    {
+        NRF_EGU3->EVENTS_TRIGGERED[0] = 0;
+        (void) NRF_EGU3->EVENTS_TRIGGERED[0];
+        
+        NRF_PPI->CHENCLR = m_ppi_chen_mask;
+        
+        m_timer_update_in_progress = false;
+    }
+}
+
 static inline void sync_timer_offset_compensate(void)
 {
-    uint32_t chn0, chn1, chg;
-    int32_t peer_timer;
-    int32_t local_timer;
-    int32_t timer_offset;
+    uint32_t peer_timer;
+    uint32_t local_timer;
+    uint32_t timer_offset;
+    
+    if (m_timer_update_in_progress)
+    {
+        return;
+    }
 
     peer_timer  = m_sync_pkt.timer_val;
     peer_timer += TX_CHAIN_DELAY;
@@ -480,15 +499,30 @@ static inline void sync_timer_offset_compensate(void)
     if (timer_offset == 0 ||
         timer_offset == TIMER_MAX_VAL)
     {
+//        NRF_GPIO->OUT ^= (1 << 25);
         // Already in sync
         return;
     }
     
+    // Write offset to timer compare register
+    m_params.high_freq_timer[0]->CC[2] = (TIMER_MAX_VAL - timer_offset);
+    
+    m_timer_update_in_progress = true;
+    
+    // Enable PPI channels
+    NRF_PPI->CHENSET = m_ppi_chen_mask;
+}
+
+static void ppi_configure(void)
+{
+    uint32_t chn0, chn1, chn2, chg;
+    
     chn0 = m_params.ppi_chns[0];
     chn1 = m_params.ppi_chns[1];
+    chn2 = m_params.ppi_chns[3];
     chg  = m_params.ppi_chhg;
     
-    // Use a timer compare register to reset the timer according to the offset value
+    m_ppi_chen_mask = (1 << chn0) | (1 << chn1) | (1 << chn2);
     
     // PPI channel 0: clear timer when offset value is reached
     NRF_PPI->CHENCLR      = (1 << chn0);
@@ -500,15 +534,12 @@ static inline void sync_timer_offset_compensate(void)
     NRF_PPI->CH[chn1].EEP = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
     NRF_PPI->CH[chn1].TEP = (uint32_t) &NRF_PPI->TASKS_CHG[chg].DIS;
     
-    // Use PPI group for PPI channel 0 disabling
+    NRF_PPI->CHENCLR      = (1 << chn2);
+    NRF_PPI->CH[chn2].EEP = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
+    NRF_PPI->CH[chn2].TEP = (uint32_t) &m_params.egu->TASKS_TRIGGER[0];
+    
     NRF_PPI->TASKS_CHG[chg].DIS = 1;
-    NRF_PPI->CHG[chg]           = (1 << chn0);
-    
-    // Write offset to timer compare register
-    m_params.high_freq_timer[0]->CC[2] = (TIMER_MAX_VAL - timer_offset);
-    
-    // Enable PPI channels
-    NRF_PPI->CHENSET = (1 << chn0) | (1 << chn1);
+    NRF_PPI->CHG[chg]           = (1 << chn0) | (1 << chn2);
 }
 
 uint32_t ts_init(const ts_params_t * p_params)
@@ -516,7 +547,8 @@ uint32_t ts_init(const ts_params_t * p_params)
     memcpy(&m_params, p_params, sizeof(ts_params_t));
     
     if (m_params.high_freq_timer[0] == 0 ||
-        m_params.rtc                == 0)
+        m_params.rtc                == 0 ||
+        m_params.egu                == 0)
     {
         // TODO: Check all params
         return NRF_ERROR_INVALID_PARAM;
@@ -564,6 +596,14 @@ uint32_t ts_enable(void)
         return err_code;
     }
     
+    ppi_configure();
+    
+    NVIC_ClearPendingIRQ(m_params.egu_irq_type);
+    NVIC_SetPriority(m_params.egu_irq_type, 7);
+    NVIC_EnableIRQ(m_params.egu_irq_type);
+    
+    m_params.egu->INTENSET = EGU_INTENSET_TRIGGERED0_Msk;
+    
     m_blocked_cancelled_count  = 0;
     m_send_sync_pkt            = false;
     m_radio_state              = RADIO_STATE_IDLE;
@@ -571,6 +611,9 @@ uint32_t ts_enable(void)
     sync_timer_start();
     
     m_timeslot_session_open    = true;
+    
+//    NRF_GPIO->DIRSET = (1 << 23);
+//    NRF_GPIO->DIRSET = (1 << 25);
     
     return NRF_SUCCESS;
 }

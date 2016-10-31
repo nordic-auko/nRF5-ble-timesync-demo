@@ -906,10 +906,13 @@ static void sync_timer_button_init(void)
     ts_params.high_freq_timer[0] = NRF_TIMER2;
     ts_params.high_freq_timer[1] = NRF_TIMER3;
     ts_params.rtc             = NRF_RTC1;
+    ts_params.egu             = NRF_EGU3;
+    ts_params.egu_irq_type    = SWI3_EGU3_IRQn;
     ts_params.ppi_chhg        = 0;
     ts_params.ppi_chns[0]     = 1;
     ts_params.ppi_chns[1]     = 2;
     ts_params.ppi_chns[2]     = 3;
+    ts_params.ppi_chns[3]     = 4;
     ts_params.rf_chn          = 125;
     memcpy(ts_params.rf_addr, rf_address, sizeof(rf_address));
     
@@ -927,7 +930,7 @@ static void sync_timer_button_init(void)
  */
 int main(void)
 {
-    uint32_t err_code;
+//    uint32_t err_code;
     bool erase_bonds = true;
 
     // Initialize.
@@ -943,10 +946,10 @@ int main(void)
 
     // Start execution.
     application_timers_start();
-    err_code = ble_advertising_start(BLE_ADV_MODE_FAST);
-    APP_ERROR_CHECK(err_code);
+//    err_code = ble_advertising_start(BLE_ADV_MODE_FAST);
+//    APP_ERROR_CHECK(err_code);
     
-    m_advertising_running = true;
+//    m_advertising_running = true;
     
     sync_timer_button_init();
 
