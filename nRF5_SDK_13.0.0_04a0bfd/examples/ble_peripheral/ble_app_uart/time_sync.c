@@ -7,9 +7,12 @@
 #include "app_error.h"
 #include "nrf.h"
 #include "nrf_error.h"
-#include "nrf_log.h"
 #include "nrf_soc.h"
 #include "nrf_sdm.h"
+
+#define NRF_LOG_MODULE_NAME "TIME_SYNC"
+#include "nrf_log.h"
+#include "nrf_log_ctrl.h"
 
 #if   defined ( __CC_ARM )
 #define TX_CHAIN_DELAY_PRESCALER_0 699
@@ -421,20 +424,20 @@ void ts_on_sys_evt(uint32_t sys_evt)
             break;
         }
         case NRF_EVT_RADIO_SIGNAL_CALLBACK_INVALID_RETURN:
-            NRF_LOG_PRINTF("NRF_EVT_RADIO_SIGNAL_CALLBACK_INVALID_RETURN\r\n");
+            NRF_LOG_ERROR("NRF_EVT_RADIO_SIGNAL_CALLBACK_INVALID_RETURN\r\n");
             app_error_handler(MAIN_DEBUG, __LINE__, (const uint8_t*)__FILE__);
             break;
         case NRF_EVT_RADIO_SESSION_CLOSED:
             {
                 m_timeslot_session_open = false;
                 
-                NRF_LOG_PRINTF("NRF_EVT_RADIO_SESSION_CLOSED\r\n");
+                NRF_LOG_INFO("NRF_EVT_RADIO_SESSION_CLOSED\r\n");
             }
         
             break;
         case NRF_EVT_RADIO_SESSION_IDLE:
         {
-            NRF_LOG_PRINTF("NRF_EVT_RADIO_SESSION_IDLE\r\n");
+            NRF_LOG_INFO("NRF_EVT_RADIO_SESSION_IDLE\r\n");
             
             uint32_t err_code = sd_radio_session_close();
             APP_ERROR_CHECK(err_code);
@@ -442,7 +445,7 @@ void ts_on_sys_evt(uint32_t sys_evt)
         }
         default:
             // No implementation needed.
-            NRF_LOG_PRINTF("Event: 0x%08x\r\n", sys_evt);
+            NRF_LOG_INFO("Event: 0x%08x\r\n", sys_evt);
             break;
     }
 }
