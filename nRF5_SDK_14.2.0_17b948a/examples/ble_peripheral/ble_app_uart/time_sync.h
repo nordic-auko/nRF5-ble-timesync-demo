@@ -48,6 +48,9 @@
 
 #define TS_SOC_OBSERVER_PRIO 0
 
+#define TIME_SYNC_TIMER_MAX_VAL (40000)
+#define TIME_SYNC_RTC_MAX_VAL   (0xFFFFFF)
+
 /**@brief Data handler type. */
 typedef void (*ts_evt_handler_t)(uint32_t time);
 
@@ -56,8 +59,8 @@ typedef struct
     uint8_t          rf_chn;          /** RF Channel [0-80] */
     uint8_t          rf_addr[5];      /** 5-byte RF address */
     uint8_t          ppi_chns[4];     /** PPI channels */
-    uint8_t          ppi_chhg;        /** PPI Channel Group */
-    NRF_TIMER_Type * high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2) */
+    uint8_t          ppi_chg;        /** PPI Channel Group */
+    NRF_TIMER_Type * high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2). NOTE: debug toggling only available if TIMER3 or TIMER4 is used for high_freq_timer[0]*/
     NRF_RTC_Type   * rtc;
     NRF_EGU_Type   * egu;
     IRQn_Type        egu_irq_type;
@@ -99,6 +102,26 @@ uint32_t ts_tx_start(uint32_t sync_freq_hz);
  * @retval NRF_SUCCESS if successful 
  */
 uint32_t ts_tx_stop(void);
+
+/**@brief Get timestamp value in 16 MHz ticks
+ *
+ * @note 32-bit variable overflows after ~268 seconds
+ * 
+ * @param[in] ppi_chn PPI channel to use for timer capture. Channel is not used after function exits.
+ * 
+ * @retval timestamp value [1 second/16 MHz]
+ */
+uint32_t ts_timestamp_get_ticks_u32(uint8_t ppi_chn);
+
+/**@brief Get timestamp value in 16 MHz ticks
+ *
+ * @note Internal 32-bit counter overflows after (2^32 * @ref TIME_SYNC_TIMER_MAX_VAL) / 16 000 000 seconds. 
+ * 
+ * @param[in] ppi_chn PPI channel to use for timer capture. Channel is not used after function exits.
+ * 
+ * @retval timestamp value [1 second/16 MHz]
+ */
+uint64_t ts_timestamp_get_ticks_u64(uint8_t ppi_chn);
 
 
 #endif /* __TIME_SYNC_H__ */

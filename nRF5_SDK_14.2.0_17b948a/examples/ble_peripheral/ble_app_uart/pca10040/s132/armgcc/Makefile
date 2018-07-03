@@ -183,9 +183,9 @@ INC_FOLDERS += \
 LIB_FILES += \
 
 # Optimization flags
-OPT = -O3 -g3
+OPT = -O2 -g3
 # Uncomment the line below to enable link time optimization
-#OPT += -flto
+OPT += -flto
 
 # C flags common to all targets
 CFLAGS += $(OPT)
@@ -234,7 +234,7 @@ LDFLAGS += -mfloat-abi=hard -mfpu=fpv4-sp-d16
 # let linker dump unused sections
 LDFLAGS += -Wl,--gc-sections
 # use newlib in nano version
-LDFLAGS += --specs=nano.specs
+# LDFLAGS += --specs=nano.specs
 
 
 # Add standard libraries at the very end of the linker input, after all objects
