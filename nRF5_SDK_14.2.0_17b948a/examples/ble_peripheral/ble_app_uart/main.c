@@ -527,7 +527,7 @@ void bsp_event_handler(bsp_event_t event)
                     
                     bsp_board_leds_on();
                     
-                    err_code = ts_tx_start(100);
+                    err_code = ts_tx_start(200);
                     APP_ERROR_CHECK(err_code);
                     
                     NRF_LOG_INFO("Starting sync beacon transmission!\r\n");
