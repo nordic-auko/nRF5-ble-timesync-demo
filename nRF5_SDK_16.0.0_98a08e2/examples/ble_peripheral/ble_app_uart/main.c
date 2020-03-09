@@ -80,6 +80,11 @@
 #include "nrf_log_ctrl.h"
 #include "nrf_log_default_backends.h"
 
+#include "time_sync.h"
+#include "nrf_gpiote.h"
+#include "nrf_ppi.h"
+#include "nrf_timer.h"
+
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
 
 #define DEVICE_NAME                     "Nordic_UART"                               /**< Name of device. Will be included in the advertising data. */
@@ -482,6 +487,38 @@ void bsp_event_handler(bsp_event_t event)
     uint32_t err_code;
     switch (event)
     {
+        case BSP_EVENT_KEY_0:
+        case BSP_EVENT_KEY_1:
+        case BSP_EVENT_KEY_2:
+        case BSP_EVENT_KEY_3:
+            {
+                static bool m_send_sync_pkt = false;
+                
+                if (m_send_sync_pkt)
+                {
+                    m_send_sync_pkt = false;
+                    
+                    bsp_board_leds_off();
+                    
+                    err_code = ts_tx_stop();
+                    APP_ERROR_CHECK(err_code);
+                    
+                    NRF_LOG_INFO("Stopping sync beacon transmission!\r\n");
+                }
+                else
+                {
+                    m_send_sync_pkt = true;
+                    
+                    bsp_board_leds_on();
+                    
+                    err_code = ts_tx_start(200);
+                    APP_ERROR_CHECK(err_code);
+                    
+                    NRF_LOG_INFO("Starting sync beacon transmission!\r\n");
+                }
+            }
+            break;
+
         case BSP_EVENT_SLEEP:
             sleep_mode_enter();
             break;
@@ -691,6 +728,53 @@ static void advertising_start(void)
     APP_ERROR_CHECK(err_code);
 }
 
+static void sync_timer_button_init(void)
+{
+    uint32_t       err_code;
+    uint8_t        rf_address[5] = {0xDE, 0xAD, 0xBE, 0xEF, 0x19};
+    ts_params_t    ts_params;
+    
+    // Debug pin: 
+    // nRF52-DK (PCA10040) Toggle P0.24 from sync timer to allow pin measurement
+    // nRF52840-DK (PCA10056) Toggle P1.14 from sync timer to allow pin measurement
+#if defined(BOARD_PCA10040)
+    nrf_gpiote_task_configure(3, NRF_GPIO_PIN_MAP(0, 24), NRF_GPIOTE_POLARITY_TOGGLE, NRF_GPIOTE_INITIAL_VALUE_LOW);
+    nrf_gpiote_task_enable(3);
+#elif defined(BOARD_PCA10056)
+    nrf_gpiote_task_configure(3, NRF_GPIO_PIN_MAP(1, 14), NRF_GPIOTE_POLARITY_TOGGLE, NRF_GPIOTE_INITIAL_VALUE_LOW);
+    nrf_gpiote_task_enable(3);
+#else
+#warning Debug pin not set
+#endif
+    
+    nrf_ppi_channel_endpoint_setup(
+        NRF_PPI_CHANNEL0, 
+        (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
+        nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+    nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
+    
+    ts_params.high_freq_timer[0] = NRF_TIMER3;
+    ts_params.high_freq_timer[1] = NRF_TIMER2;
+    ts_params.rtc             = NRF_RTC1;
+    ts_params.egu             = NRF_EGU3;
+    ts_params.egu_irq_type    = SWI3_EGU3_IRQn;
+    ts_params.ppi_chg         = 0;
+    ts_params.ppi_chns[0]     = 1;
+    ts_params.ppi_chns[1]     = 2;
+    ts_params.ppi_chns[2]     = 3;
+    ts_params.ppi_chns[3]     = 4;
+    ts_params.rf_chn          = 125; /* For testing purposes */
+    memcpy(ts_params.rf_addr, rf_address, sizeof(rf_address));
+    
+    err_code = ts_init(&ts_params);
+    APP_ERROR_CHECK(err_code);
+    
+    err_code = ts_enable();
+    APP_ERROR_CHECK(err_code);
+    
+    NRF_LOG_INFO("Started listening for beacons.\r\n");
+    NRF_LOG_INFO("Press Button 1 to start sending sync beacons\r\n");
+}
 
 /**@brief Application main function.
  */
@@ -710,6 +794,8 @@ int main(void)
     services_init();
     advertising_init();
     conn_params_init();
+
+    sync_timer_button_init();
 
     // Start execution.
     printf("\r\nUART started.\r\n");

@@ -769,11 +769,13 @@ uint32_t ts_init(const ts_params_t * p_params)
         return NRF_ERROR_INVALID_PARAM;
     }
 
-    if (SYNC_RTC_PRESCALER != m_params.rtc->PRESCALER)
-    {
-        // TODO: Handle this
-        return NRF_ERROR_INVALID_STATE;
-    }
+    // TODO: Implement use of RTC as a low-power (and lower accuracy)
+    // alternative to 16 MHz TIMER
+    // if (SYNC_RTC_PRESCALER != m_params.rtc->PRESCALER)
+    // {
+    //     // TODO: Handle this
+    //     return NRF_ERROR_INVALID_STATE;
+    // }
 
     APP_ERROR_CHECK(nrf_balloc_init(&m_sync_pkt_pool));
 
