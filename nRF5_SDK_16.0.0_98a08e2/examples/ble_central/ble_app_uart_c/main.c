@@ -530,6 +530,38 @@ void bsp_event_handler(bsp_event_t event)
 
     switch (event)
     {
+        case BSP_EVENT_KEY_0:
+        case BSP_EVENT_KEY_1:
+        case BSP_EVENT_KEY_2:
+        case BSP_EVENT_KEY_3:
+            {
+                static bool m_send_sync_pkt = false;
+
+                if (m_send_sync_pkt)
+                {
+                    m_send_sync_pkt = false;
+
+                    bsp_board_leds_off();
+
+                    err_code = ts_tx_stop();
+                    APP_ERROR_CHECK(err_code);
+
+                    NRF_LOG_INFO("Stopping sync beacon transmission!\r\n");
+                }
+                else
+                {
+                    m_send_sync_pkt = true;
+
+                    bsp_board_leds_on();
+
+                    err_code = ts_tx_start(200);
+                    APP_ERROR_CHECK(err_code);
+
+                    NRF_LOG_INFO("Starting sync beacon transmission!\r\n");
+                }
+            }
+            break;
+
         case BSP_EVENT_SLEEP:
             nrf_pwr_mgmt_shutdown(NRF_PWR_MGMT_SHUTDOWN_GOTO_SYSOFF);
             break;
@@ -595,7 +627,7 @@ static void buttons_leds_init(void)
     ret_code_t err_code;
     bsp_event_t startup_event;
 
-    err_code = bsp_init(BSP_INIT_LEDS, bsp_event_handler);
+    err_code = bsp_init(BSP_INIT_LEDS | BSP_INIT_BUTTONS, bsp_event_handler);
     APP_ERROR_CHECK(err_code);
 
     err_code = bsp_btn_ble_init(NULL, &startup_event);
@@ -663,8 +695,8 @@ static void sync_timer_init(void)
     uint32_t       err_code;
     uint8_t        rf_address[5] = {0xDE, 0xAD, 0xBE, 0xEF, 0x19};
     ts_params_t    ts_params;
-    
-    // Debug pin: 
+
+    // Debug pin:
     // nRF52-DK (PCA10040) Toggle P0.24 from sync timer to allow pin measurement
     // nRF52840-DK (PCA10056) Toggle P1.14 from sync timer to allow pin measurement
 #if defined(BOARD_PCA10040)
@@ -676,13 +708,13 @@ static void sync_timer_init(void)
 #else
 #warning Debug pin not set
 #endif
-    
+
     nrf_ppi_channel_endpoint_setup(
-        NRF_PPI_CHANNEL0, 
+        NRF_PPI_CHANNEL0,
         (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
         nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
     nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
-    
+
     ts_params.high_freq_timer[0] = NRF_TIMER3;
     ts_params.high_freq_timer[1] = NRF_TIMER2;
     ts_params.rtc             = NRF_RTC1;
@@ -695,13 +727,13 @@ static void sync_timer_init(void)
     ts_params.ppi_chns[3]     = 4;
     ts_params.rf_chn          = 125; /* For testing purposes */
     memcpy(ts_params.rf_addr, rf_address, sizeof(rf_address));
-    
+
     err_code = ts_init(&ts_params);
     APP_ERROR_CHECK(err_code);
-    
+
     err_code = ts_enable();
     APP_ERROR_CHECK(err_code);
-    
+
     NRF_LOG_INFO("Started listening for beacons.\r\n");
     NRF_LOG_INFO("Press Button 1 to start sending sync beacons\r\n");
 }
