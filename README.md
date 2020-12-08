@@ -20,8 +20,10 @@ The transmitter will begin toggling a GPIO immediately, and all 4 LEDs should li
 When the receiver DK(s) receives the first sync packet, it will start toggling a GPIO as well.
 
 The GPIO assignment is as follows:
-nRF52-DK: P0.24
-nRF52840-DK: P1.14
+| DK          | GPIO  |
+| ----------- | ----- |
+| nRF52-DK    | P0.24 |
+| nRF52840-DK | P1.14 |
 
 ## Measure performance
 Connect an oscilloscope or logic analyzer to the toggling GPIO and observe the delay between each GPIO edge.
