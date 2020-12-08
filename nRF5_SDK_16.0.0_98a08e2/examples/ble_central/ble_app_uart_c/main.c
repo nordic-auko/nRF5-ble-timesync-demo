@@ -690,11 +690,26 @@ static void idle_state_handle(void)
     }
 }
 
+static void ts_evt_callback(const ts_trigger_evt_t* evt)
+{
+	ASSERT(evt);
+
+	NRF_LOG_INFO("Trigger Status: %d | %d | %d",
+						evt->startTick,
+						evt->targetTick,
+						evt->syncPacketCnt);
+
+	/*
+	 * Set a new trigger
+	 */
+	uint32_t err_code = ts_set_trigger(evt->targetTick + 500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
+	APP_ERROR_CHECK(err_code);
+}
+
 static void sync_timer_init(void)
 {
     uint32_t       err_code;
-    uint8_t        rf_address[5] = {0xDE, 0xAD, 0xBE, 0xEF, 0x19};
-    ts_params_t    ts_params;
+    ts_init_t    init_ts;
 
     // Debug pin:
     // nRF52-DK (PCA10040) Toggle P0.24 from sync timer to allow pin measurement
@@ -709,29 +724,31 @@ static void sync_timer_init(void)
 #warning Debug pin not set
 #endif
 
-    nrf_ppi_channel_endpoint_setup(
-        NRF_PPI_CHANNEL0,
-        (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
-        nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
-    nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
+//    nrf_ppi_channel_endpoint_setup(
+//        NRF_PPI_CHANNEL0,
+//        (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
+//        nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+//    nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
 
-    ts_params.high_freq_timer[0] = NRF_TIMER3;
-    ts_params.high_freq_timer[1] = NRF_TIMER2;
-    ts_params.rtc             = NRF_RTC1;
-    ts_params.egu             = NRF_EGU3;
-    ts_params.egu_irq_type    = SWI3_EGU3_IRQn;
-    ts_params.ppi_chg         = 0;
-    ts_params.ppi_chns[0]     = 1;
-    ts_params.ppi_chns[1]     = 2;
-    ts_params.ppi_chns[2]     = 3;
-    ts_params.ppi_chns[3]     = 4;
-    ts_params.rf_chn          = 125; /* For testing purposes */
-    memcpy(ts_params.rf_addr, rf_address, sizeof(rf_address));
+    init_ts.high_freq_timer[0] = NRF_TIMER2;
+    init_ts.high_freq_timer[1] = NRF_TIMER3;
+//    ts_params.rtc             = NRF_RTC1;
+    init_ts.egu             = NRF_EGU3;
+    init_ts.egu_irq_type    = SWI3_EGU3_IRQn;
 
-    err_code = ts_init(&ts_params);
+    err_code = ts_init(&init_ts);
     APP_ERROR_CHECK(err_code);
 
-    err_code = ts_enable();
+	ts_rf_config_t rf_config =
+	{
+		.rf_chn = 125,	/* For testing purposes */
+		.rf_addr = { 0xDE, 0xAD, 0xBE, 0xEF, 0x19 }
+	};
+
+    err_code = ts_enable(&rf_config);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = ts_set_trigger(500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
     APP_ERROR_CHECK(err_code);
 
     NRF_LOG_INFO("Started listening for beacons.\r\n");

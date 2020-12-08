@@ -44,27 +44,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "nrf.h"
+#include "nrfx.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define TS_SOC_OBSERVER_PRIO 0
 
-#define TIME_SYNC_TIMER_MAX_VAL (40000)
+#define TIME_SYNC_TIMER_MAX_VAL (40000)	// sync timer time base: 2.5 ms
 #define TIME_SYNC_RTC_MAX_VAL   (0xFFFFFF)
-
-/**@brief Data handler type. */
-typedef void (*ts_evt_handler_t)(uint32_t time);
 
 typedef struct
 {
-    uint8_t          rf_chn;          /** RF Channel [0-80] */
-    uint8_t          rf_addr[5];      /** 5-byte RF address */
-    uint8_t          ppi_chns[4];     /** PPI channels */
-    uint8_t          ppi_chg;        /** PPI Channel Group */
     NRF_TIMER_Type * high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2). NOTE: debug toggling only available if TIMER3 or TIMER4 is used for high_freq_timer[0]*/
-    NRF_RTC_Type   * rtc;
     NRF_EGU_Type   * egu;
     IRQn_Type        egu_irq_type;
-} ts_params_t;
+} ts_init_t;
+
 
 /**@brief Initialize time sync library
  * 
@@ -72,13 +69,32 @@ typedef struct
  *
  * @retval NRF_SUCCESS if successful 
  */
-uint32_t ts_init(const ts_params_t * p_params);
+uint32_t ts_init(const ts_init_t * p_init);
+
+typedef struct
+{
+	uint32_t startTick;
+	uint32_t targetTick;
+	uint32_t lastSync;
+	uint16_t syncPacketCnt;
+	uint16_t usedPacketCnt;
+} ts_trigger_evt_t;
+
+typedef void (*ts_evt_handler_t)(const ts_trigger_evt_t* evt);
+
+uint32_t ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint, ts_evt_handler_t callback);
+
+typedef struct
+{
+	uint8_t rf_chn; 	/** RF Channel [0-80] */
+	uint8_t rf_addr[5]; /** 5-byte RF address */
+} ts_rf_config_t;
 
 /**@brief Enable time sync library. This will enable reception of sync packets.
  *
  * @retval NRF_SUCCESS if successful 
  */
-uint32_t ts_enable(void);
+uint32_t ts_enable(const ts_rf_config_t* p_rf_config);
 
 /**@brief Disable time sync library. 
  *
@@ -111,7 +127,7 @@ uint32_t ts_tx_stop(void);
  * 
  * @retval timestamp value [1 second/16 MHz]
  */
-uint32_t ts_timestamp_get_ticks_u32(uint8_t ppi_chn);
+uint32_t ts_timestamp_get_ticks_u32(void);
 
 /**@brief Get timestamp value in 16 MHz ticks
  *
@@ -121,7 +137,10 @@ uint32_t ts_timestamp_get_ticks_u32(uint8_t ppi_chn);
  * 
  * @retval timestamp value [1 second/16 MHz]
  */
-uint64_t ts_timestamp_get_ticks_u64(uint8_t ppi_chn);
+uint64_t ts_timestamp_get_ticks_u64(void);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __TIME_SYNC_H__ */
