@@ -82,7 +82,7 @@
 
 #include "time_sync.h"
 #include "nrf_gpiote.h"
-#include "nrf_ppi.h"
+#include "nrfx_ppi.h"
 #include "nrf_timer.h"
 
 #define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
@@ -121,6 +121,12 @@ static ble_uuid_t m_adv_uuids[]          =                                      
 {
     {BLE_UUID_NUS_SERVICE, NUS_SERVICE_UUID_TYPE}
 };
+
+static bool m_gpio_trigger_enabled;
+
+static void ts_evt_callback(const ts_evt_t* evt);
+static void ts_gpio_trigger_enable(void);
+static void ts_gpio_trigger_disable(void);
 
 
 /**@brief Function for assert macro callback.
@@ -487,59 +493,48 @@ void bsp_event_handler(bsp_event_t event)
     switch (event)
     {
         case BSP_EVENT_KEY_0:
-        case BSP_EVENT_KEY_1:
-        case BSP_EVENT_KEY_2:
-        case BSP_EVENT_KEY_3:
             {
                 static bool m_send_sync_pkt = false;
-                
+
                 if (m_send_sync_pkt)
                 {
                     m_send_sync_pkt = false;
-                    
+                    m_gpio_trigger_enabled = false;
+
                     bsp_board_leds_off();
-                    
+
                     err_code = ts_tx_stop();
                     APP_ERROR_CHECK(err_code);
-                    
+
                     NRF_LOG_INFO("Stopping sync beacon transmission!\r\n");
                 }
                 else
                 {
                     m_send_sync_pkt = true;
-                    
+
                     bsp_board_leds_on();
-                    
-                    err_code = ts_tx_start(200);
+
+                    err_code = ts_tx_start(TIME_SYNC_FREQ_AUTO);
                     APP_ERROR_CHECK(err_code);
-                    
+
+                    ts_gpio_trigger_enable();
+
                     NRF_LOG_INFO("Starting sync beacon transmission!\r\n");
                 }
             }
             break;
 
-        case BSP_EVENT_SLEEP:
-            sleep_mode_enter();
-            break;
+        case BSP_EVENT_KEY_2:
+        {
+            uint64_t time_ticks;
+            uint32_t time_usec;
 
-        case BSP_EVENT_DISCONNECT:
-            err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
-            if (err_code != NRF_ERROR_INVALID_STATE)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
-            break;
+            time_ticks = ts_timestamp_get_ticks_u64();
+            time_usec = TIME_SYNC_TIMESTAMP_TO_USEC(time_ticks);
 
-        case BSP_EVENT_WHITELIST_OFF:
-            if (m_conn_handle == BLE_CONN_HANDLE_INVALID)
-            {
-                err_code = ble_advertising_restart_without_whitelist(&m_advertising);
-                if (err_code != NRF_ERROR_INVALID_STATE)
-                {
-                    APP_ERROR_CHECK(err_code);
-                }
-            }
+            NRF_LOG_INFO("Timestamp: %d us (%d, %d)", time_usec, time_usec / 1000000, time_usec / 1000);
             break;
+        }
 
         default:
             break;
@@ -689,7 +684,7 @@ static void buttons_leds_init(bool * p_erase_bonds)
  */
 static void log_init(void)
 {
-    ret_code_t err_code = NRF_LOG_INIT(NULL);
+    ret_code_t err_code = NRF_LOG_INIT(app_timer_cnt_get);
     APP_ERROR_CHECK(err_code);
 
     NRF_LOG_DEFAULT_BACKENDS_INIT();
@@ -727,27 +722,79 @@ static void advertising_start(void)
     APP_ERROR_CHECK(err_code);
 }
 
-static void ts_evt_callback(const ts_trigger_evt_t* evt)
+static void ts_gpio_trigger_enable(void)
 {
-	ASSERT(evt);
+    uint64_t time_now_ticks;
+    uint32_t time_now_msec;
+    uint32_t time_target;
+    uint32_t err_code;
 
-	NRF_LOG_INFO("Trigger Status: %d | %d | %d | %d | %d",
-						evt->startTick,
-						evt->targetTick,
-						evt->syncPacketCnt,
-						evt->usedPacketCnt,
-						evt->lastSync);
+    if (m_gpio_trigger_enabled)
+    {
+        return;
+    }
 
-	uint32_t err_code = ts_set_trigger(evt->targetTick + 500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
-	APP_ERROR_CHECK(err_code);
+    // Round up to nearest second to next 250 ms to start toggling.
+    // If the receiver has received a valid sync packet within this time, the GPIO toggling polarity will be the same.
+
+    time_now_ticks = ts_timestamp_get_ticks_u64();
+    time_now_msec = TIME_SYNC_TIMESTAMP_TO_USEC(time_now_ticks) / 1000;
+
+    time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (250 * 2);
+    time_target = (time_target / 250) * 250;
+
+    err_code = ts_set_trigger(time_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+    APP_ERROR_CHECK(err_code);
+
+    nrf_gpiote_task_set(NRF_GPIOTE_TASKS_CLR_3);
+
+    m_gpio_trigger_enabled = true;
 }
 
-static void sync_timer_button_init(void)
+static void ts_gpio_trigger_disable(void)
 {
-    uint32_t       err_code;
-    ts_init_t    init_ts;
-    
-    // Debug pin: 
+    m_gpio_trigger_enabled = false;
+}
+
+static void ts_evt_callback(const ts_evt_t* evt)
+{
+    APP_ERROR_CHECK_BOOL(evt != NULL);
+
+    switch (evt->type)
+    {
+        case TS_EVT_SYNCHRONIZED:
+            ts_gpio_trigger_enable();
+            break;
+        case TS_EVT_DESYNCHRONIZED:
+            ts_gpio_trigger_disable();
+            break;
+        case TS_EVT_TRIGGERED:
+            if (m_gpio_trigger_enabled)
+            {
+                uint32_t tick_target;
+
+                tick_target = evt->params.triggered.tick_target + 2;
+
+                uint32_t err_code = ts_set_trigger(tick_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+                APP_ERROR_CHECK(err_code);
+            }
+            else
+            {
+                // Ensure pin is low when triggering is stopped
+                nrf_gpiote_task_set(NRF_GPIOTE_TASKS_CLR_3);
+            }
+            break;
+        default:
+            APP_ERROR_CHECK_BOOL(false);
+            break;
+    }
+}
+
+static void sync_timer_init(void)
+{
+    uint32_t err_code;
+
+    // Debug pin:
     // nRF52-DK (PCA10040) Toggle P0.24 from sync timer to allow pin measurement
     // nRF52840-DK (PCA10056) Toggle P1.14 from sync timer to allow pin measurement
 #if defined(BOARD_PCA10040)
@@ -759,44 +806,31 @@ static void sync_timer_button_init(void)
 #else
 #warning Debug pin not set
 #endif
-    
-//    nrf_ppi_channel_endpoint_setup(
-//        NRF_PPI_CHANNEL0,
-//        (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
-//        nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
-//    nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
-    
-    init_ts.high_freq_timer[0] = NRF_TIMER2;
-    init_ts.high_freq_timer[1] = NRF_TIMER3;
-//    ts_params.rtc             = NRF_RTC1;
-    init_ts.egu             = NRF_EGU3;
-    init_ts.egu_irq_type    = SWI3_EGU3_IRQn;
+
+    ts_init_t init_ts =
+    {
+        .high_freq_timer[0] = NRF_TIMER3,
+        .high_freq_timer[1] = NRF_TIMER4,
+        .egu                = NRF_EGU3,
+        .egu_irq_type       = SWI3_EGU3_IRQn,
+        .evt_handler        = ts_evt_callback,
+    };
 
     err_code = ts_init(&init_ts);
     APP_ERROR_CHECK(err_code);
-    
+
 	ts_rf_config_t rf_config =
 	{
-		.rf_chn = 125,	/* For testing purposes */
+		.rf_chn = 80,
 		.rf_addr = { 0xDE, 0xAD, 0xBE, 0xEF, 0x19 }
 	};
 
     err_code = ts_enable(&rf_config);
     APP_ERROR_CHECK(err_code);
-    
-    /*
-     * FIXME:
-     * This is a hack in order to try out this feature.
-     * You have to start the synchronization master before this trigger is reached.
-     * After that master and receiver will trigger in sync.
-     *
-     * -> Replace this by sending a valid timestamp via BLE
-     */
-    err_code = ts_set_trigger(5500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
-    APP_ERROR_CHECK(err_code);
 
     NRF_LOG_INFO("Started listening for beacons.\r\n");
-    NRF_LOG_INFO("Press Button 1 to start sending sync beacons\r\n");
+    NRF_LOG_INFO("Press Button 1 to start transmitting sync beacons\r\n");
+    NRF_LOG_INFO("GPIO toggling will begin when transmission has started.\r\n");
 }
 
 /**@brief Application main function.
@@ -818,7 +852,7 @@ int main(void)
     advertising_init();
     conn_params_init();
 
-    sync_timer_button_init();
+    sync_timer_init();
 
     // Start execution.
     printf("\r\nUART started.\r\n");

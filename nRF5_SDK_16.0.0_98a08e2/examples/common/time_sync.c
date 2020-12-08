@@ -47,6 +47,7 @@
 #include "app_error.h"
 #include "app_util_platform.h"
 #include "nrf.h"
+#include "nrf_gpio.h"
 #include "nrf_assert.h"
 #include "nrf_atomic.h"
 #include "nrf_balloc.h"
@@ -66,7 +67,7 @@ NRF_LOG_MODULE_REGISTER();
 #elif defined ( __ICCARM__ )
 #define TX_CHAIN_DELAY_PRESCALER_0 (703 - 235)
 #elif defined ( __GNUC__ )
-#define TX_CHAIN_DELAY_PRESCALER_0 (704 - 235)
+#define TX_CHAIN_DELAY_PRESCALER_0 (704 - 237)
 #endif
 
 #define SYNC_TIMER_PRESCALER 0
@@ -78,6 +79,11 @@ NRF_LOG_MODULE_REGISTER();
 #error Invalid prescaler value
 #endif
 
+#if TIME_SYNC_TIMER_MAX_VAL < 10000
+#error Timer values below 10000 not supported
+#endif
+
+#if TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT == 0
 /*
  * If the master time is already > TIME_SYNC_TIMER_MAX_VAL, or the time it takes
  * to call ppi_sync_timer_adjust_enable() for the slave will cause it to become greater than TIME_SYNC_TIMER_MAX_VAL,
@@ -86,6 +92,10 @@ NRF_LOG_MODULE_REGISTER();
  * This is a "safety zone" in order to avoid this behavior
  */
 #define CHECK_INVALID_TIMING(timer_val) ((timer_val + TX_CHAIN_DELAY) > (TIME_SYNC_TIMER_MAX_VAL - 10000))
+#else
+// Not needed when TX interval is actively adjusted
+#define CHECK_INVALID_TIMING(timer_val) (false)
+#endif
 
 static void ts_on_sys_evt(uint32_t sys_evt, void * p_context);
 
@@ -103,7 +113,6 @@ NRF_SDH_SOC_OBSERVER(timesync_soc_obs,     \
 
 static void ppi_sync_timer_adjust_configure(void);
 static void ppi_sync_timer_adjust_enable(void);
-static void ppi_sync_timer_adjust_disable(void);
 static void ppi_radio_rx_disable(void);
 static void ppi_radio_rx_configure(void);
 static void ppi_radio_tx_configure(void);
@@ -111,43 +120,49 @@ static uint32_t ppi_sync_trigger_configure(uint32_t ppi_endpoint);
 
 typedef struct
 {
-    uint8_t          		rf_chn;          /** RF Channel [0-80] */
-    uint8_t 		 		rf_addr[5];      /** 5-byte RF address */
-    nrf_ppi_channel_t		ppi_chns[5];     /** PPI channels */
+    uint8_t                 rf_chn;          /** RF Channel [0-80] */
+    uint8_t                 rf_addr[5];      /** 5-byte RF address */
+    nrf_ppi_channel_t       ppi_chns[5];     /** PPI channels */
     nrf_ppi_channel_group_t ppi_chg;        /** PPI Channel Group */
-    NRF_TIMER_Type * 		high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2). NOTE: debug toggling only available if TIMER3 or TIMER4 is used for high_freq_timer[0]*/
-    NRF_EGU_Type   * 		egu;
-    IRQn_Type        		egu_irq_type;
+    NRF_TIMER_Type *        high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2). NOTE: debug toggling only available if TIMER3 or TIMER4 is used for high_freq_timer[0]*/
+    NRF_EGU_Type   *        egu;
+    IRQn_Type               egu_irq_type;
 } ts_params_t;
 
-typedef __packed struct
+typedef PACKED_STRUCT
 {
     int32_t  timer_val;
     int32_t  rtc_val;
     uint32_t counter_val;
 } sync_pkt_t;
 
-NRF_BALLOC_DEF(m_sync_pkt_pool, sizeof(sync_pkt_t), 10);
+static uint8_t          m_sync_pkt_ringbuf[10][sizeof(sync_pkt_t)];
+static nrf_atomic_u32_t m_sync_pkt_ringbuf_idx;
 
-static volatile bool     m_timeslot_session_open;
-static volatile bool	 m_pending_close;
-static volatile uint32_t m_blocked_cancelled_count;
+static nrf_atomic_flag_t m_timeslot_session_open;
+static nrf_atomic_flag_t m_pending_close;
+static nrf_atomic_u32_t  m_blocked_cancelled_count;
 static uint32_t          m_total_timeslot_length = 0;
 static uint32_t          m_timeslot_distance = 0;
+static int32_t           m_tx_offset = 0;
+static uint32_t          m_tx_slot_retry_count = 0;
+static uint32_t          m_usec_since_sync_packet = 0;
+static uint32_t          m_usec_since_tx_offset_calc = 0;
 static ts_params_t       m_params;
 
-static volatile bool m_send_sync_pkt = false;
-static volatile bool m_timer_update_in_progress = false;
-static volatile bool m_invalid_tx_timing = false;
+static nrf_atomic_flag_t m_send_sync_pkt = false;
+static nrf_atomic_flag_t m_timer_update_in_progress = false;
+static nrf_atomic_flag_t m_invalid_tx_timing = false;
 
-static volatile uint32_t m_master_counter = 0;
-static volatile uint32_t m_rcv_count      = 0;
+static bool m_synchronized = false;
 
-static volatile sync_pkt_t * mp_curr_adj_pkt;
+static nrf_atomic_u32_t  m_master_counter = 0;
+static nrf_atomic_u32_t  m_rcv_count      = 0;
+
+static nrf_atomic_u32_t  mp_curr_adj_pkt;
 
 static ts_evt_handler_t m_callback;
-static ts_trigger_evt_t m_trigger_evt;
-
+static ts_evt_t m_trigger_evt = {.type = TS_EVT_TRIGGERED};
 
 static volatile enum
 {
@@ -159,6 +174,7 @@ static volatile enum
 static bool sync_timer_offset_compensate(sync_pkt_t * p_pkt);
 static void timeslot_begin_handler(void);
 static void timeslot_end_handler(void);
+static int32_t calculate_tx_start_offset(void);
 
 /**< This will be used when requesting the first timeslot or any time a timeslot is blocked or cancelled. */
 static nrf_radio_request_t m_timeslot_req_earliest = {
@@ -167,7 +183,7 @@ static nrf_radio_request_t m_timeslot_req_earliest = {
             NRF_RADIO_HFCLK_CFG_XTAL_GUARANTEED,
             NRF_RADIO_PRIORITY_NORMAL,
             TS_LEN_US,
-            NRF_RADIO_EARLIEST_TIMEOUT_MAX_US
+            100000 /* Expect timeslot within 100 ms */
         }};
 
 /**< This will be used at the end of each timeslot to request the next timeslot. */
@@ -206,6 +222,48 @@ static nrf_radio_signal_callback_return_param_t m_rsc_return_no_action = {
         .params.request = {NULL}
         };
 
+static void increment_desync_timeout(uint32_t increment_usec)
+{
+    if (m_send_sync_pkt)
+    {
+        // No desync as transmitter
+        return;
+    }
+
+    m_usec_since_sync_packet += increment_usec;
+    if (m_usec_since_sync_packet >= TIME_SYNC_DESYNC_TIMEOUT)
+    {
+        m_params.egu->TASKS_TRIGGER[3] = 1;
+        m_usec_since_sync_packet = 0; // Reset to suppress needless irq generation
+    }
+}
+
+static void increment_tx_offset_timeout(uint32_t increment_usec)
+{
+#if TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT != 0
+    if (!m_send_sync_pkt)
+    {
+        return;
+    }
+
+    m_usec_since_tx_offset_calc += increment_usec;
+    if (m_usec_since_tx_offset_calc >= TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT)
+    {
+        m_params.egu->TASKS_TRIGGER[4] = 1;
+        m_usec_since_tx_offset_calc = 0;
+    }
+#endif
+}
+
+static sync_pkt_t * tx_buf_get(void)
+{
+    uint32_t idx;
+
+    idx = nrf_atomic_u32_fetch_add(&m_sync_pkt_ringbuf_idx, 1) % ARRAY_SIZE(m_sync_pkt_ringbuf);
+
+    return (sync_pkt_t *) m_sync_pkt_ringbuf[idx];
+}
+
 void RADIO_IRQHandler(void)
 {
     if (NRF_RADIO->EVENTS_END != 0)
@@ -222,16 +280,18 @@ void RADIO_IRQHandler(void)
             p_pkt = (sync_pkt_t *) NRF_RADIO->PACKETPTR;
 
             adjustment_procedure_started = sync_timer_offset_compensate(p_pkt);
-            m_trigger_evt.syncPacketCnt++; // rx packet received
+            m_trigger_evt.params.triggered.sync_packet_count++; // rx packet received
 
             if (adjustment_procedure_started)
             {
-                p_pkt = nrf_balloc_alloc(&m_sync_pkt_pool);
-                APP_ERROR_CHECK_BOOL(p_pkt != 0);
+                p_pkt = tx_buf_get();
 
                 NRF_RADIO->PACKETPTR = (uint32_t) p_pkt;
+
+                m_usec_since_sync_packet = 0;
             }
-            ++m_rcv_count;
+
+            nrf_atomic_u32_add(&m_rcv_count, 1);
         }
 
         NRF_RADIO->TASKS_START = 1;
@@ -272,6 +332,7 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
         NVIC_EnableIRQ(TIMER0_IRQn);
 
         m_total_timeslot_length = 0;
+        m_tx_slot_retry_count = 0;
 
         timeslot_begin_handler();
 
@@ -292,7 +353,9 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
             // Schedule next timeslot
             if (m_send_sync_pkt)
             {
-                m_timeslot_req_normal.params.normal.distance_us = m_total_timeslot_length + m_timeslot_distance;
+                m_timeslot_req_normal.params.normal.distance_us = m_timeslot_distance - m_tx_offset;
+
+                increment_tx_offset_timeout(m_timeslot_distance);
 
                 /*
                  * If the timing of the last tx packet was invalid:
@@ -301,15 +364,16 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
                  * but this makes sure that the next tx packets will be valid again.
                  */
                 if (m_invalid_tx_timing)
-				{
-                	m_invalid_tx_timing = false;
-					return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_earliest;
-				}
-				else
-				{
-					return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_normal;
-				}
-			}
+                {
+                    nrf_atomic_flag_clear(&m_invalid_tx_timing);
+                    return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_earliest;
+                }
+                else
+                {
+                    m_tx_offset = 0;
+                    return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_normal;
+                }
+            }
             else
             {
                 return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_earliest;
@@ -331,20 +395,20 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
             }
             else if (!m_send_sync_pkt)
             {
-                // Don't do anything. Timeslot will end and new one requested upon the next timer0 compare.
+                return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_earliest;
             }
         }
         break;
-
-
 
     case NRF_RADIO_CALLBACK_SIGNAL_TYPE_RADIO:
         RADIO_IRQHandler();
         break;
 
     case NRF_RADIO_CALLBACK_SIGNAL_TYPE_EXTEND_FAILED:
-    	timeslot_end_handler();
-        // Don't do anything. Our timer will expire before timeslot ends
+        timeslot_end_handler();
+
+        increment_desync_timeout(TX_LEN_EXTENSION_US);
+
         return (nrf_radio_signal_callback_return_param_t*) &m_rsc_return_sched_next_earliest;
 
     case NRF_RADIO_CALLBACK_SIGNAL_TYPE_EXTEND_SUCCEEDED:
@@ -358,6 +422,8 @@ static nrf_radio_signal_callback_return_param_t * radio_callback (uint8_t signal
 
         // Keep track of total length
         m_total_timeslot_length += TX_LEN_EXTENSION_US;
+
+        increment_desync_timeout(TX_LEN_EXTENSION_US);
         break;
 
     default:
@@ -412,10 +478,6 @@ static void update_radio_parameters(sync_pkt_t * p_pkt)
     NVIC_EnableIRQ(RADIO_IRQn);
 }
 
-/**@brief IRQHandler used for execution context management.
-  *        Any available handler can be used as we're not using the associated hardware.
-  *        This handler is used to stop and disable UESB
-  */
 void timeslot_end_handler(void)
 {
     NRF_RADIO->TASKS_DISABLE = 1;
@@ -423,27 +485,21 @@ void timeslot_end_handler(void)
 
     ppi_radio_rx_disable();
 
-    nrf_balloc_free(&m_sync_pkt_pool, (void*) NRF_RADIO->PACKETPTR);
-
-    m_total_timeslot_length = 0;
     m_radio_state           = RADIO_STATE_IDLE;
 }
 
-/**@brief IRQHandler used for execution context management.
-  *        Any available handler can be used as we're not using the associated hardware.
-  *        This handler is used to initiate UESB RX/TX
-  */
 void timeslot_begin_handler(void)
 {
     sync_pkt_t * p_pkt;
+
+    m_total_timeslot_length = 0;
 
     if (!m_send_sync_pkt)
     {
         if (m_radio_state    != RADIO_STATE_RX ||
             NRF_RADIO->STATE != (RADIO_STATE_STATE_Rx << RADIO_STATE_STATE_Pos))
         {
-            p_pkt = nrf_balloc_alloc(&m_sync_pkt_pool);
-            APP_ERROR_CHECK_BOOL(p_pkt != 0);
+            p_pkt = tx_buf_get();
 
             update_radio_parameters(p_pkt);
 
@@ -460,6 +516,7 @@ void timeslot_begin_handler(void)
 
     if (m_radio_state == RADIO_STATE_RX)
     {
+        // Packet transmission has now started (state change from RX).
         NRF_RADIO->EVENTS_DISABLED = 0;
         NRF_RADIO->TASKS_DISABLE = 1;
         while (NRF_RADIO->EVENTS_DISABLED == 0)
@@ -468,8 +525,7 @@ void timeslot_begin_handler(void)
         }
     }
 
-    p_pkt = nrf_balloc_alloc(&m_sync_pkt_pool);
-    APP_ERROR_CHECK_BOOL(p_pkt != 0);
+    p_pkt = tx_buf_get();
 
     ppi_radio_tx_configure();
     update_radio_parameters(p_pkt);
@@ -488,9 +544,12 @@ void timeslot_begin_handler(void)
     p_pkt->counter_val = m_params.high_freq_timer[1]->CC[1];
 //    p_pkt->rtc_val     = m_params.rtc->COUNTER;
 
-    m_invalid_tx_timing = CHECK_INVALID_TIMING(p_pkt->timer_val);
+    if (CHECK_INVALID_TIMING(p_pkt->timer_val))
+    {
+        nrf_atomic_flag_set(&m_invalid_tx_timing);
+    }
 
-    m_trigger_evt.syncPacketCnt++; // tx packet sent
+    m_trigger_evt.params.triggered.sync_packet_count++; // tx packet sent
     m_radio_state = RADIO_STATE_TX;
 }
 
@@ -508,18 +567,29 @@ void ts_on_sys_evt(uint32_t sys_evt, void * p_context)
         case NRF_EVT_RADIO_BLOCKED:
         case NRF_EVT_RADIO_CANCELED:
         {
-			if (!m_pending_close)
-			{
-            	/*
-            	 * This is caused by a conflict with an active BLE session.
-            	 * This will mess up the tx frequency, because the next request is scheduled immediately
-            	 */
-				// Blocked events are rescheduled with normal priority. They could also
-				// be rescheduled with high priority if necessary.
-				uint32_t err_code = sd_radio_request((nrf_radio_request_t*) &m_timeslot_req_earliest);
-				APP_ERROR_CHECK(err_code);
-				m_blocked_cancelled_count++;
-			}
+            if (!m_pending_close)
+            {
+                /*
+                 * This is caused by a conflict with an active BLE session.
+                 * This will mess up the tx frequency, because the next request is scheduled immediately
+                 */
+                // Blocked events are rescheduled with normal priority. They could also
+                // be rescheduled with high priority if necessary.
+                if (m_send_sync_pkt && m_tx_slot_retry_count < 5)
+                {
+                    ++m_tx_slot_retry_count;
+                    m_timeslot_req_normal.params.normal.distance_us = m_timeslot_distance * (m_tx_slot_retry_count + 2);
+                    uint32_t err_code = sd_radio_request((nrf_radio_request_t*) &m_timeslot_req_normal);
+                    APP_ERROR_CHECK(err_code);
+                }
+                else
+                {
+                    uint32_t err_code = sd_radio_request((nrf_radio_request_t*) &m_timeslot_req_earliest);
+                    APP_ERROR_CHECK(err_code);
+                }
+
+                nrf_atomic_u32_add(&m_blocked_cancelled_count, 1);
+            }
             break;
         }
         case NRF_EVT_RADIO_SIGNAL_CALLBACK_INVALID_RETURN:
@@ -527,9 +597,9 @@ void ts_on_sys_evt(uint32_t sys_evt, void * p_context)
             app_error_handler(MAIN_DEBUG, __LINE__, (const uint8_t*)__FILE__);
             break;
         case NRF_EVT_RADIO_SESSION_CLOSED:
-			m_timeslot_session_open = false;
-			m_pending_close = false;
-			NRF_LOG_INFO("NRF_EVT_RADIO_SESSION_CLOSED\r\n");
+            nrf_atomic_flag_clear(&m_timeslot_session_open);
+            nrf_atomic_flag_clear(&m_pending_close);
+            NRF_LOG_INFO("NRF_EVT_RADIO_SESSION_CLOSED\r\n");
             break;
         case NRF_EVT_RADIO_SESSION_IDLE:
         {
@@ -582,30 +652,55 @@ static void sync_timer_start(void)
     m_params.high_freq_timer[0]->TASKS_START = 1;
 }
 
-uint32_t ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint, ts_evt_handler_t callback)
+#if TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT == 0
+static uint32_t calculate_tx_start_offset(void)
 {
-	if (!m_timeslot_session_open)
-	{
-		return NRF_ERROR_INVALID_STATE;
-	}
+    return 0;
+}
+#else
+static int32_t calculate_tx_start_offset(void)
+{
+    // It is best to align transmissions with the timer wraparound.
+    // Calculate offset that can be added to the first TX packet in a series.
+    // Due to between HFCLK and LFCLK this might have to be recalculated regularly.
 
-	if (ppi_sync_trigger_configure(ppi_endpoint) != NRF_SUCCESS)
-	{
-		return NRF_ERROR_INVALID_PARAM;
-	}
+    uint64_t ticks_now;
+    uint64_t rounded_ticks;
+    int32_t offset_us;
 
-	m_callback = callback;
-	m_trigger_evt.syncPacketCnt = 0;
-	m_trigger_evt.usedPacketCnt = 0;
+    ticks_now = ts_timestamp_get_ticks_u64();
+    rounded_ticks = ((ticks_now + TIME_SYNC_TIMER_MAX_VAL) / TIME_SYNC_TIMER_MAX_VAL) * TIME_SYNC_TIMER_MAX_VAL;
+    offset_us = ROUNDED_DIV(TIME_SYNC_TIMER_MAX_VAL, 16)  - (ROUNDED_DIV(rounded_ticks, 16) - ROUNDED_DIV(ticks_now, 16));
 
-	// TODO: is there a way to check if the target value is plausible?
-	m_trigger_evt.startTick = ts_timestamp_get_ticks_u64() / TIME_SYNC_TIMER_MAX_VAL;
-	
-	// set capture to new target: (target - local_counter) + (local_counter - m_master_counter)
-	m_params.high_freq_timer[1]->CC[4] = target_tick - m_master_counter;
-	m_trigger_evt.targetTick = target_tick;
-	nrf_ppi_channel_enable(m_params.ppi_chns[4]); // activate trigger
-	return NRF_SUCCESS;
+    NRF_LOG_DEBUG("offset_us: %d", offset_us);
+
+    return offset_us;
+}
+#endif
+
+uint32_t ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint)
+{
+    if (!m_timeslot_session_open)
+    {
+        return NRF_ERROR_INVALID_STATE;
+    }
+
+    if (ppi_sync_trigger_configure(ppi_endpoint) != NRF_SUCCESS)
+    {
+        return NRF_ERROR_INVALID_PARAM;
+    }
+
+    m_trigger_evt.params.triggered.sync_packet_count = 0;
+    m_trigger_evt.params.triggered.used_packet_count = 0;
+
+    // TODO: is there a way to check if the target value is plausible?
+    m_trigger_evt.params.triggered.tick_start = ts_timestamp_get_ticks_u64() / TIME_SYNC_TIMER_MAX_VAL;
+
+    // set capture to new target: (target - local_counter) + (local_counter - m_master_counter)
+    m_params.high_freq_timer[1]->CC[4] = target_tick - m_master_counter;
+    m_trigger_evt.params.triggered.tick_target = target_tick;
+    nrf_ppi_channel_enable(m_params.ppi_chns[4]); // activate trigger
+    return NRF_SUCCESS;
 }
 
 void SWI3_EGU3_IRQHandler(void)
@@ -614,25 +709,71 @@ void SWI3_EGU3_IRQHandler(void)
     {
         NRF_EGU3->EVENTS_TRIGGERED[0] = 0;
 
-        m_master_counter = mp_curr_adj_pkt->counter_val;
-        m_params.high_freq_timer[1]->CC[4] = m_trigger_evt.targetTick - m_master_counter;	// calculate new capture
-        m_timer_update_in_progress = false;
+        nrf_atomic_u32_fetch_store(&m_master_counter, ((sync_pkt_t *) mp_curr_adj_pkt)->counter_val);
+        m_params.high_freq_timer[1]->CC[4] = m_trigger_evt.params.triggered.tick_target - m_master_counter;	// calculate new capture
 
-        m_trigger_evt.usedPacketCnt++;
-        m_trigger_evt.lastSync = m_master_counter;
+        m_trigger_evt.params.triggered.used_packet_count++;
+        m_trigger_evt.params.triggered.last_sync = m_master_counter;
 
-        nrf_balloc_free(&m_sync_pkt_pool, (void*)mp_curr_adj_pkt);
-	}
-	else if (NRF_EGU3->EVENTS_TRIGGERED[2] != 0)
-	{
-		NRF_EGU3->EVENTS_TRIGGERED[2] = 0;
-		nrf_ppi_channel_disable(m_params.ppi_chns[4]);
+        nrf_atomic_flag_clear(&m_timer_update_in_progress);
 
-		if (m_callback)
-		{
-			m_callback(&m_trigger_evt);
-		}
-	}
+        if (!m_synchronized)
+        {
+            m_synchronized = true;
+
+            if (m_callback)
+            {
+                ts_evt_t evt =
+                {
+                    .type = TS_EVT_SYNCHRONIZED,
+                };
+
+                m_callback(&evt);
+            }
+        }
+    }
+
+    if (NRF_EGU3->EVENTS_TRIGGERED[2] != 0)
+    {
+        NRF_EGU3->EVENTS_TRIGGERED[2] = 0;
+        nrf_ppi_channel_disable(m_params.ppi_chns[4]);
+
+        if (m_callback)
+        {
+            m_callback(&m_trigger_evt);
+        }
+    }
+
+    if (NRF_EGU3->EVENTS_TRIGGERED[3] != 0)
+    {
+        NRF_EGU3->EVENTS_TRIGGERED[3] = 0;
+
+        if (m_synchronized)
+        {
+            m_synchronized = false;
+
+            if (m_callback)
+            {
+                ts_evt_t evt =
+                {
+                    .type = TS_EVT_DESYNCHRONIZED,
+                };
+
+                m_callback(&evt);
+            }
+        }
+    }
+
+    if (NRF_EGU3->EVENTS_TRIGGERED[4] != 0)
+    {
+        int32_t offset_us;
+
+        NRF_EGU3->EVENTS_TRIGGERED[4] = 0;
+
+        offset_us = calculate_tx_start_offset();
+
+        m_tx_offset = offset_us;
+    }
 }
 
 static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
@@ -647,9 +788,9 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     }
 
     if (CHECK_INVALID_TIMING(p_pkt->timer_val))
-	{
-		return false;
-	}
+    {
+        return false;
+    }
 
     peer_timer  = p_pkt->timer_val;
     peer_timer += TX_CHAIN_DELAY;
@@ -664,26 +805,26 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
         timer_offset = peer_timer - local_timer;
     }
 
-	/*
-	 * FIXME:
-	 * This is a PPI / timer timing issue:
-	 * If the the CC[2] for the timer reset is too close to the timer overflow,
-	 * the timer behavior becomes fuzzy...
-	 * Probably because of the PPI + timer task delays, it is possible that the
-	 * timestamp PPI task is executed after the timer was reset.
-	 */
-	if (timer_offset < 5)
-	{
-		m_trigger_evt.usedPacketCnt++;
-		m_trigger_evt.lastSync = p_pkt->counter_val;
-		return false;
-	}
+    /*
+     * FIXME:
+     * This is a PPI / timer timing issue:
+     * If the the CC[2] for the timer reset is too close to the timer overflow,
+     * the timer behavior becomes fuzzy...
+     * Probably because of the PPI + timer task delays, it is possible that the
+     * timestamp PPI task is executed after the timer was reset.
+     */
+    if (timer_offset < 5)
+    {
+        m_trigger_evt.params.triggered.used_packet_count++;
+        m_trigger_evt.params.triggered.last_sync = p_pkt->counter_val;
+        return false;
+    }
 
     if (timer_offset == 0 || timer_offset == TIME_SYNC_TIMER_MAX_VAL)
     {
         // Already in sync
-    	m_trigger_evt.usedPacketCnt++;
-    	m_trigger_evt.lastSync = p_pkt->counter_val;
+        m_trigger_evt.params.triggered.used_packet_count++;
+        m_trigger_evt.params.triggered.last_sync = p_pkt->counter_val;
         return false;
     }
     else if (timer_offset > TIME_SYNC_TIMER_MAX_VAL)
@@ -701,15 +842,15 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     p_pkt->counter_val++;
 
     // resetting the timer to the trigger target will skip the trigger -> avoid this
-	if (p_pkt->counter_val == m_trigger_evt.targetTick)
-	{
-		return false;
-	}
+    if (p_pkt->counter_val == m_trigger_evt.params.triggered.tick_target)
+    {
+        return false;
+    }
 
-	ASSERT(m_params.high_freq_timer[0]->CC[2] < TIME_SYNC_TIMER_MAX_VAL);
+    ASSERT(m_params.high_freq_timer[0]->CC[2] < TIME_SYNC_TIMER_MAX_VAL);
 
-    m_timer_update_in_progress = true;
-    mp_curr_adj_pkt            = p_pkt;
+    nrf_atomic_flag_set(&m_timer_update_in_progress);
+    nrf_atomic_u32_fetch_store(&mp_curr_adj_pkt, (uint32_t) p_pkt);
 
     ppi_sync_timer_adjust_enable();
 
@@ -807,22 +948,22 @@ static void ppi_sync_timer_adjust_enable(void)
     NRF_PPI->TASKS_CHG[m_params.ppi_chg].EN = 1;
 }
 
-static void ppi_sync_timer_adjust_disable(void)
-{
-    NRF_PPI->TASKS_CHG[m_params.ppi_chg].DIS = 1;
-}
+// static void ppi_sync_timer_adjust_disable(void)
+// {
+//     NRF_PPI->TASKS_CHG[m_params.ppi_chg].DIS = 1;
+// }
 
 uint32_t ppi_sync_trigger_configure(uint32_t ppi_endpoint)
 {
-	// FIXME: I'm not sure why, but if I use return A && B, B will not get called
-	uint32_t error = nrfx_ppi_channel_assign(m_params.ppi_chns[4], (uint32_t) &m_params.high_freq_timer[1]->EVENTS_COMPARE[4], ppi_endpoint);
+    uint32_t error;
 
-	if (error != NRF_SUCCESS)
-	{
-		return error;
-	}
+    error = nrfx_ppi_channel_assign(m_params.ppi_chns[4], (uint32_t) &m_params.high_freq_timer[1]->EVENTS_COMPARE[4], ppi_endpoint);
+    if (error != NRF_SUCCESS)
+    {
+        return error;
+    }
 
-	return nrfx_ppi_channel_fork_assign(m_params.ppi_chns[4], (uint32_t) &m_params.egu->TASKS_TRIGGER[2]);
+    return nrfx_ppi_channel_fork_assign(m_params.ppi_chns[4], (uint32_t) &m_params.egu->TASKS_TRIGGER[2]);
 }
 
 static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer_val, uint32_t * p_peer_counter)
@@ -889,8 +1030,9 @@ static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer
 uint32_t ts_init(const ts_init_t * p_init)
 {
     if (p_init->high_freq_timer[0] == 0 ||
-    	p_init->high_freq_timer[1] == 0 ||
-		p_init->egu                == 0)
+        p_init->high_freq_timer[1] == 0 ||
+        p_init->egu                == 0 ||
+        p_init->evt_handler        == 0)
     {
         return NRF_ERROR_INVALID_PARAM;
     }
@@ -898,21 +1040,22 @@ uint32_t ts_init(const ts_init_t * p_init)
     memcpy(m_params.high_freq_timer, p_init->high_freq_timer, sizeof(m_params.high_freq_timer));
     m_params.egu = p_init->egu;
     m_params.egu_irq_type = p_init->egu_irq_type;
+    m_callback = p_init->evt_handler;
 
     nrfx_err_t ret = nrfx_ppi_group_alloc(&m_params.ppi_chg);
     if (ret != NRFX_SUCCESS)
-	{
-		return NRF_ERROR_INTERNAL;
-	}
+    {
+        return NRF_ERROR_INTERNAL;
+    }
 
     for (size_t i = 0; i < sizeof(m_params.ppi_chns) / sizeof(m_params.ppi_chns[0]); i++)
-	{
-		ret = nrfx_ppi_channel_alloc(&m_params.ppi_chns[i]);
-		if (ret != NRFX_SUCCESS)
-		{
-			return NRF_ERROR_INTERNAL;
-		}
-	}
+    {
+        ret = nrfx_ppi_channel_alloc(&m_params.ppi_chns[i]);
+        if (ret != NRFX_SUCCESS)
+        {
+            return NRF_ERROR_INTERNAL;
+        }
+    }
 
     if (m_params.egu != NRF_EGU3)
     {
@@ -928,8 +1071,6 @@ uint32_t ts_init(const ts_init_t * p_init)
     //     return NRF_ERROR_INVALID_STATE;
     // }
 
-    APP_ERROR_CHECK(nrf_balloc_init(&m_sync_pkt_pool));
-
     return NRF_SUCCESS;
 }
 
@@ -937,10 +1078,10 @@ uint32_t ts_enable(const ts_rf_config_t* p_rf_config)
 {
     uint32_t err_code;
 
-	if (p_rf_config == NULL || p_rf_config->rf_addr == NULL)
-	{
-		return NRF_ERROR_INVALID_PARAM;
-	}
+    if (p_rf_config == NULL || p_rf_config->rf_addr == NULL)
+    {
+        return NRF_ERROR_INVALID_PARAM;
+    }
 
     if (m_timeslot_session_open)
     {
@@ -978,36 +1119,38 @@ uint32_t ts_enable(const ts_rf_config_t* p_rf_config)
     ppi_sync_timer_adjust_configure();
 
     NVIC_ClearPendingIRQ(m_params.egu_irq_type);
-    NVIC_SetPriority(m_params.egu_irq_type, 7);
+    NVIC_SetPriority(m_params.egu_irq_type, TIME_SYNC_EVT_HANDLER_IRQ_PRIORITY);
     NVIC_EnableIRQ(m_params.egu_irq_type);
 
     m_params.egu->INTENCLR = 0xFFFFFFFF;
-    m_params.egu->INTENSET = EGU_INTENSET_TRIGGERED0_Msk | EGU_INTENSET_TRIGGERED2_Msk;
+    m_params.egu->INTENSET = EGU_INTENSET_TRIGGERED0_Msk | EGU_INTENSET_TRIGGERED2_Msk | EGU_INTENSET_TRIGGERED3_Msk | EGU_INTENSET_TRIGGERED4_Msk;
 
     m_blocked_cancelled_count  = 0;
-    m_send_sync_pkt            = false;
     m_radio_state              = RADIO_STATE_IDLE;
+
+    nrf_atomic_flag_clear(&m_send_sync_pkt);
 
     timestamp_counter_start();
     sync_timer_start();
 
-    m_timeslot_session_open    = true;
+    nrf_atomic_flag_set(&m_timeslot_session_open);
 
     return NRF_SUCCESS;
 }
 
 uint32_t ts_disable(void)
 {
-	uint32_t err_code;
-	m_pending_close = true;
+    uint32_t err_code;
 
-	err_code = sd_radio_session_close();
+    nrf_atomic_flag_set(&m_pending_close);
+
+    err_code = sd_radio_session_close();
     if (err_code != NRF_SUCCESS)
     {
         return err_code;
     }
 
-	// TODO: stop timer
+    // TODO: stop timer
 
     err_code = sd_clock_hfclk_release();
     if (err_code != NRF_SUCCESS)
@@ -1037,22 +1180,35 @@ uint32_t ts_tx_start(uint32_t sync_freq_hz)
 {
     uint32_t distance;
 
-    distance = (1000000 / sync_freq_hz);
+    if (sync_freq_hz == TIME_SYNC_FREQ_AUTO)
+    {
+        // 20-30 Hz is a good range
+        // Higher frequency gives more margin for missed packets, but doesn't improve accuracy
+        uint32_t auto_freq_target = 30;
+        distance = (ROUNDED_DIV(ROUNDED_DIV(1000000, auto_freq_target), (TIME_SYNC_TIMER_MAX_VAL / 16))) * (TIME_SYNC_TIMER_MAX_VAL / 16);
+    }
+    else
+    {
+        distance = (1000000 / sync_freq_hz);
+    }
+
     if (distance >= NRF_RADIO_DISTANCE_MAX_US)
     {
         return NRF_ERROR_INVALID_PARAM;
     }
 
     m_timeslot_distance = distance;
+    m_tx_offset = calculate_tx_start_offset();
+    m_usec_since_tx_offset_calc = 0;
 
-    m_send_sync_pkt = true;
+    nrf_atomic_flag_set(&m_send_sync_pkt);
 
     return NRF_SUCCESS;
 }
 
 uint32_t ts_tx_stop()
 {
-    m_send_sync_pkt = false;
+    nrf_atomic_flag_clear(&m_send_sync_pkt);
 
     return NRF_SUCCESS;
 }

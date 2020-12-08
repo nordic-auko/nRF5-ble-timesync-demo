@@ -89,6 +89,12 @@ NRF_BLE_GQ_DEF(m_ble_gatt_queue,                                        /**< BLE
 
 static uint16_t m_ble_nus_max_data_len = BLE_GATT_ATT_MTU_DEFAULT - OPCODE_LENGTH - HANDLE_LENGTH; /**< Maximum length of data (in bytes) that can be transmitted to the peer by the Nordic UART service module. */
 
+static bool m_gpio_trigger_enabled;
+
+static void ts_evt_callback(const ts_evt_t* evt);
+static void ts_gpio_trigger_enable(void);
+static void ts_gpio_trigger_disable(void);
+
 /**@brief NUS UUID. */
 static ble_uuid_t const m_nus_uuid =
 {
@@ -526,20 +532,17 @@ void gatt_init(void)
  */
 void bsp_event_handler(bsp_event_t event)
 {
-    ret_code_t err_code;
-
+    uint32_t err_code;
     switch (event)
     {
         case BSP_EVENT_KEY_0:
-        case BSP_EVENT_KEY_1:
-        case BSP_EVENT_KEY_2:
-        case BSP_EVENT_KEY_3:
             {
                 static bool m_send_sync_pkt = false;
 
                 if (m_send_sync_pkt)
                 {
                     m_send_sync_pkt = false;
+                    m_gpio_trigger_enabled = false;
 
                     bsp_board_leds_off();
 
@@ -554,26 +557,27 @@ void bsp_event_handler(bsp_event_t event)
 
                     bsp_board_leds_on();
 
-                    err_code = ts_tx_start(200);
+                    err_code = ts_tx_start(TIME_SYNC_FREQ_AUTO);
                     APP_ERROR_CHECK(err_code);
+
+                    ts_gpio_trigger_enable();
 
                     NRF_LOG_INFO("Starting sync beacon transmission!\r\n");
                 }
             }
             break;
 
-        case BSP_EVENT_SLEEP:
-            nrf_pwr_mgmt_shutdown(NRF_PWR_MGMT_SHUTDOWN_GOTO_SYSOFF);
-            break;
+        case BSP_EVENT_KEY_2:
+        {
+            uint64_t time_ticks;
+            uint32_t time_usec;
 
-        case BSP_EVENT_DISCONNECT:
-            err_code = sd_ble_gap_disconnect(m_ble_nus_c.conn_handle,
-                                             BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
-            if (err_code != NRF_ERROR_INVALID_STATE)
-            {
-                APP_ERROR_CHECK(err_code);
-            }
+            time_ticks = ts_timestamp_get_ticks_u64();
+            time_usec = TIME_SYNC_TIMESTAMP_TO_USEC(time_ticks);
+
+            NRF_LOG_INFO("Timestamp: %d us (%d, %d)", time_usec, time_usec / 1000000, time_usec / 1000);
             break;
+        }
 
         default:
             break;
@@ -690,26 +694,76 @@ static void idle_state_handle(void)
     }
 }
 
-static void ts_evt_callback(const ts_trigger_evt_t* evt)
+static void ts_gpio_trigger_enable(void)
 {
-	ASSERT(evt);
+    uint64_t time_now_ticks;
+    uint32_t time_now_msec;
+    uint32_t time_target;
+    uint32_t err_code;
 
-	NRF_LOG_INFO("Trigger Status: %d | %d | %d",
-						evt->startTick,
-						evt->targetTick,
-						evt->syncPacketCnt);
+    if (m_gpio_trigger_enabled)
+    {
+        return;
+    }
 
-	/*
-	 * Set a new trigger
-	 */
-	uint32_t err_code = ts_set_trigger(evt->targetTick + 500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
-	APP_ERROR_CHECK(err_code);
+    // Round up to nearest second to next 250 ms to start toggling.
+    // If the receiver has received a valid sync packet within this time, the GPIO toggling polarity will be the same.
+
+    time_now_ticks = ts_timestamp_get_ticks_u64();
+    time_now_msec = TIME_SYNC_TIMESTAMP_TO_USEC(time_now_ticks) / 1000;
+
+    time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (250 * 2);
+    time_target = (time_target / 250) * 250;
+
+    err_code = ts_set_trigger(time_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+    APP_ERROR_CHECK(err_code);
+
+    nrf_gpiote_task_set(NRF_GPIOTE_TASKS_CLR_3);
+
+    m_gpio_trigger_enabled = true;
 }
 
+static void ts_gpio_trigger_disable(void)
+{
+    m_gpio_trigger_enabled = false;
+}
+
+static void ts_evt_callback(const ts_evt_t* evt)
+{
+    APP_ERROR_CHECK_BOOL(evt != NULL);
+
+    switch (evt->type)
+    {
+        case TS_EVT_SYNCHRONIZED:
+            ts_gpio_trigger_enable();
+            break;
+        case TS_EVT_DESYNCHRONIZED:
+            ts_gpio_trigger_disable();
+            break;
+        case TS_EVT_TRIGGERED:
+            if (m_gpio_trigger_enabled)
+            {
+                uint32_t tick_target;
+
+                tick_target = evt->params.triggered.tick_target + 2;
+
+                uint32_t err_code = ts_set_trigger(tick_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
+                APP_ERROR_CHECK(err_code);
+            }
+            else
+            {
+                // Ensure pin is low when triggering is stopped
+                nrf_gpiote_task_set(NRF_GPIOTE_TASKS_CLR_3);
+            }
+            break;
+        default:
+            APP_ERROR_CHECK_BOOL(false);
+            break;
+    }
+}
 static void sync_timer_init(void)
 {
-    uint32_t       err_code;
-    ts_init_t    init_ts;
+    uint32_t err_code;
 
     // Debug pin:
     // nRF52-DK (PCA10040) Toggle P0.24 from sync timer to allow pin measurement
@@ -724,35 +778,30 @@ static void sync_timer_init(void)
 #warning Debug pin not set
 #endif
 
-//    nrf_ppi_channel_endpoint_setup(
-//        NRF_PPI_CHANNEL0,
-//        (uint32_t) nrf_timer_event_address_get(NRF_TIMER3, NRF_TIMER_EVENT_COMPARE4),
-//        nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
-//    nrf_ppi_channel_enable(NRF_PPI_CHANNEL0);
-
-    init_ts.high_freq_timer[0] = NRF_TIMER2;
-    init_ts.high_freq_timer[1] = NRF_TIMER3;
-//    ts_params.rtc             = NRF_RTC1;
-    init_ts.egu             = NRF_EGU3;
-    init_ts.egu_irq_type    = SWI3_EGU3_IRQn;
+    ts_init_t init_ts =
+    {
+        .high_freq_timer[0] = NRF_TIMER3,
+        .high_freq_timer[1] = NRF_TIMER4,
+        .egu                = NRF_EGU3,
+        .egu_irq_type       = SWI3_EGU3_IRQn,
+        .evt_handler        = ts_evt_callback,
+    };
 
     err_code = ts_init(&init_ts);
     APP_ERROR_CHECK(err_code);
 
 	ts_rf_config_t rf_config =
 	{
-		.rf_chn = 125,	/* For testing purposes */
+		.rf_chn = 80,
 		.rf_addr = { 0xDE, 0xAD, 0xBE, 0xEF, 0x19 }
 	};
 
     err_code = ts_enable(&rf_config);
     APP_ERROR_CHECK(err_code);
 
-    err_code = ts_set_trigger(500, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3), ts_evt_callback);
-    APP_ERROR_CHECK(err_code);
-
     NRF_LOG_INFO("Started listening for beacons.\r\n");
-    NRF_LOG_INFO("Press Button 1 to start sending sync beacons\r\n");
+    NRF_LOG_INFO("Press Button 1 to start transmitting sync beacons\r\n");
+    NRF_LOG_INFO("GPIO toggling will begin when transmission has started.\r\n");
 }
 
 int main(void)
