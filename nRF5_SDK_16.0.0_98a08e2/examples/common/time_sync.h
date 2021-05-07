@@ -55,7 +55,7 @@ extern "C" {
 #endif
 
 #ifndef TIME_SYNC_TIMER_MAX_VAL
-#define TIME_SYNC_TIMER_MAX_VAL (40000)
+#define TIME_SYNC_TIMER_MAX_VAL (16000)
 #endif
 
 #ifndef TIME_SYNC_RTC_MAX_VAL
@@ -64,10 +64,6 @@ extern "C" {
 
 #ifndef TIME_SYNC_DESYNC_TIMEOUT
 #define TIME_SYNC_DESYNC_TIMEOUT 10000000 /* Timeout for desynchronization [us] */
-#endif
-
-#ifndef TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT
-#define TIME_SYNC_TX_OFFSET_REALIGN_TIMEOUT 10000000 /* Set to 0 to disable [us] */
 #endif
 
 #ifndef TIME_SYNC_EVT_HANDLER_IRQ_PRIORITY
@@ -80,6 +76,16 @@ extern "C" {
  */
 #define TIME_SYNC_TIMESTAMP_TO_USEC(_timestamp) ROUNDED_DIV((_timestamp), 16)
 
+/**@brief Convert timestamp (@ref ts_timestamp_get_ticks_u32, @ref ts_timestamp_get_ticks_u64)to tick for use in @ref ts_set_trigger.
+ *
+ * @details Tick resolution for @ref ts_set_trigger is given by @ref TIME_SYNC_TIMER_MAX_VAL.
+ *
+ * @note Do not use a function as argument directly, as _msec is expanded twice.
+ *
+ * @note The output is rounded to the nearest integer, which can be 0.
+ */
+#define TIME_SYNC_TIMESTAMP_TO_TICK(_timestamp) ROUNDED_DIV(_timestamp, TIME_SYNC_TIMER_MAX_VAL)
+
 /**@brief Convert millisecond to tick for use in @ref ts_set_trigger.
  *
  * @details Tick resolution for @ref ts_set_trigger is given by @ref TIME_SYNC_TIMER_MAX_VAL.
@@ -90,6 +96,9 @@ extern "C" {
  */
 #define TIME_SYNC_MSEC_TO_TICK(_msec) ROUNDED_DIV((_msec * ROUNDED_DIV(16000000, TIME_SYNC_TIMER_MAX_VAL)), 1000)
 
+
+
+
 #define TIME_SYNC_FREQ_AUTO ((uint32_t) -1)
 
 typedef enum
@@ -97,6 +106,7 @@ typedef enum
     TS_EVT_SYNCHRONIZED,   /* First sync packet received from transmitter */
     TS_EVT_DESYNCHRONIZED, /* @ref TIME_SYNC_DESYNC_TIMEOUT microseconds passed without any sync packets reception from transmitter */
     TS_EVT_TRIGGERED,      /* Trigger event set by @ref ts_set_trigger */
+    TS_EVT_TIMESTAMP,      /* Timestamp triggered by PPI */
 } ts_evt_type_t;
 
 typedef struct
@@ -107,12 +117,13 @@ typedef struct
     {
         struct
         {
-            uint32_t tick_start;
+            // uint32_t tick_start;
             uint32_t tick_target;
             uint32_t last_sync;
             uint16_t sync_packet_count;
             uint16_t used_packet_count;
         } triggered;
+        uint64_t timestamp;
     } params;
 } ts_evt_t;
 
@@ -188,6 +199,19 @@ uint32_t ts_tx_stop(void);
  * @return NRF_SUCCESS or error value
  */
 uint32_t ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint);
+
+
+/**@brief Configure timestamp triggering from PPI event endpoint
+ *
+ * @details When configured, this PPI Event Endpoint will capture current timestamp value and generate @ref TS_EVT_TIMESTAMP event.
+ *
+ * @note Only TIMER instances 3 and higher can be used (@ref ts_init_t), as these have the extra compare registers required.
+ *
+ * @param[in] ppi_event_endpoint Address of PPI event endpoint that should capture timestamp
+ *
+ * @return NRF_SUCCESS or error value
+ */
+uint32_t ts_set_timestamp_trigger(uint32_t ppi_event_endpoint);
 
 /**@brief Get timestamp value in 16 MHz ticks
  *
