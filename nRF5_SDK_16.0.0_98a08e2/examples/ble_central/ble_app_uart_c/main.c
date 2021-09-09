@@ -744,8 +744,10 @@ static void ts_evt_callback(const ts_evt_t* evt)
             if (m_gpio_trigger_enabled)
             {
                 uint32_t tick_target;
+                uint32_t timestamp;
 
-                tick_target = evt->params.triggered.tick_target + 2;
+                timestamp = ts_timestamp_get_ticks_u32();
+                tick_target = TIME_SYNC_TIMESTAMP_TO_TICK(timestamp) + 2;
 
                 uint32_t err_code = ts_set_trigger(tick_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
                 APP_ERROR_CHECK(err_code);
