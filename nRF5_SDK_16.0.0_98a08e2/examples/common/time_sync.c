@@ -43,6 +43,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "app_error.h"
 #include "app_util_platform.h"
@@ -819,7 +820,7 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     // NRF_LOG_INFO("timer_offset: %d (wrapped: %d)", timer_offset, wrapped);
     // NRF_LOG_INFO("Local: %lu, Remote: %lu", local_timer, peer_timer);
 
-    if (timer_offset == 0 || timer_offset == TIME_SYNC_TIMER_MAX_VAL)
+    if (abs(timer_offset) <= 2 || timer_offset == TIME_SYNC_TIMER_MAX_VAL)
     {
         // Already in sync
         nrf_atomic_u32_add(&m_used_packet_count, 1);
