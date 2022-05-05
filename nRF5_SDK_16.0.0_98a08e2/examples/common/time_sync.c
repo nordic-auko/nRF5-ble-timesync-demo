@@ -128,6 +128,7 @@ static nrf_atomic_u32_t m_sync_pkt_ringbuf_idx;
 
 static nrf_atomic_flag_t m_timeslot_session_open;
 static nrf_atomic_flag_t m_pending_close;
+static nrf_atomic_flag_t m_pending_tx_stop;
 static nrf_atomic_u32_t  m_blocked_cancelled_count;
 static uint32_t          m_total_timeslot_length = 0;
 static uint32_t          m_timeslot_distance = 0;
@@ -469,6 +470,14 @@ void timeslot_begin_handler(void)
 
     m_total_timeslot_length = 0;
 
+    if (m_pending_tx_stop)
+    {
+        nrf_atomic_flag_clear(&m_send_sync_pkt);
+        nrf_atomic_flag_clear(&m_pending_tx_stop);
+        m_timeslot_distance = 0;
+        m_synchronized = false;
+    }
+
     if (!m_send_sync_pkt)
     {
         if (m_radio_state    != RADIO_STATE_RX ||
@@ -517,6 +526,7 @@ void timeslot_begin_handler(void)
 
     p_pkt->timer_val   = m_params.high_freq_timer[0]->CC[1];
     p_pkt->counter_val = m_params.high_freq_timer[1]->CC[1];
+    p_pkt->counter_val += m_master_counter_diff;
 
 //    p_pkt->rtc_val     = m_params.rtc->COUNTER;
 
@@ -1217,7 +1227,7 @@ uint32_t ts_tx_start(uint32_t sync_freq_hz)
 
 uint32_t ts_tx_stop()
 {
-    nrf_atomic_flag_clear(&m_send_sync_pkt);
+    nrf_atomic_flag_set(&m_pending_tx_stop);
 
     return NRF_SUCCESS;
 }
