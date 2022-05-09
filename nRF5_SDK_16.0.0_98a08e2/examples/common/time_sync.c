@@ -98,8 +98,10 @@ NRF_SDH_SOC_OBSERVER(timesync_soc_obs,     \
 
 #define MAIN_DEBUG                           0x12345678UL
 
-static void ppi_sync_timer_adjust_configure(bool do_count);
+static void ppi_sync_timer_adjust_configure(bool shorten);
 static void ppi_sync_timer_adjust_enable(void);
+static void ppi_sync_timer_clear_configure(void);
+static void ppi_sync_timer_clear_disable(void);
 static void ppi_radio_rx_disable(void);
 static void ppi_radio_rx_configure(void);
 static void ppi_radio_tx_configure(void);
@@ -109,8 +111,8 @@ typedef struct
 {
     uint8_t                 rf_chn;          /** RF Channel [0-80] */
     uint8_t                 rf_addr[5];      /** 5-byte RF address */
-    nrf_ppi_channel_t       ppi_chns[5];     /** PPI channels */
-    nrf_ppi_channel_group_t ppi_chg;        /** PPI Channel Group */
+    nrf_ppi_channel_t       ppi_chns[7];     /** PPI channels */
+    nrf_ppi_channel_group_t ppi_chgs[2];        /** PPI Channel Groups */
     NRF_TIMER_Type *        high_freq_timer[2]; /** 16 MHz timer (e.g. NRF_TIMER2). NOTE: debug toggling only available if TIMER3 or TIMER4 is used for high_freq_timer[0]*/
     NRF_EGU_Type   *        egu;
     IRQn_Type               egu_irq_type;
@@ -268,7 +270,6 @@ void RADIO_IRQHandler(void)
 
 
             adjustment_procedure_started = sync_timer_offset_compensate(p_pkt);
-            // m_trigger_evt.params.triggered.sync_packet_count++; // rx packet received
             nrf_atomic_u32_add(&m_sync_packet_count, 1);
 
             if (adjustment_procedure_started)
@@ -530,7 +531,6 @@ void timeslot_begin_handler(void)
 
 //    p_pkt->rtc_val     = m_params.rtc->COUNTER;
 
-    // m_trigger_evt.params.triggered.sync_packet_count++; // tx packet sent
     nrf_atomic_u32_add(&m_sync_packet_count, 1);
     m_radio_state = RADIO_STATE_TX;
 }
@@ -630,7 +630,7 @@ static void sync_timer_start(void)
     //     m_params.high_freq_timer[0]->CC[5]   = TIME_SYNC_TIMER_MAX_VAL / 2; // Only used for debugging purposes such as pin toggling
     // }
 
-    m_params.high_freq_timer[0]->SHORTS      = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
+    // m_params.high_freq_timer[0]->SHORTS      = TIMER_SHORTS_COMPARE0_CLEAR_Msk;
     m_params.high_freq_timer[0]->TASKS_START = 1;
 }
 
@@ -650,7 +650,6 @@ uint32_t ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint)
     nrf_atomic_u32_store(&m_used_packet_count, 0);
 
     // TODO: is there a way to check if the target value is plausible?
-    // m_trigger_evt.params.triggered.tick_start = ts_timestamp_get_ticks_u64() / TIME_SYNC_TIMER_MAX_VAL;
 
     m_params.high_freq_timer[1]->CC[4] = target_tick - m_master_counter_diff;
     nrf_atomic_u32_store(&m_tick_target, target_tick);
@@ -699,11 +698,13 @@ void SWI3_EGU3_IRQHandler(void)
         nrf_atomic_u32_add(&m_used_packet_count, 1);
         nrf_atomic_u32_store(&m_last_sync, (m_curr_adj_counter - m_master_counter_diff));
 
+        m_params.high_freq_timer[0]->CC[0] = TIME_SYNC_TIMER_MAX_VAL;
         m_params.high_freq_timer[0]->CC[2] = 0;
 
-        nrf_atomic_flag_clear(&m_timer_update_in_progress);
 
         NRF_EGU3->EVENTS_TRIGGERED[0] = 0;
+
+        nrf_atomic_flag_clear(&m_timer_update_in_progress);
 
         if (!m_synchronized)
         {
@@ -810,14 +811,14 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     int32_t timer_offset;
     bool wrapped = false;
 
-    if (m_timer_update_in_progress)
+    if (nrf_atomic_flag_set_fetch(&m_timer_update_in_progress))
     {
         return false;
     }
 
     peer_timer  = p_pkt->timer_val;
     peer_timer += TX_CHAIN_DELAY;
-    if (peer_timer > TIME_SYNC_TIMER_MAX_VAL)
+    if (peer_timer >= TIME_SYNC_TIMER_MAX_VAL)
     {
         peer_timer -= TIME_SYNC_TIMER_MAX_VAL;
         p_pkt->counter_val += 1;
@@ -827,14 +828,20 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     local_timer = m_params.high_freq_timer[0]->CC[1];
     timer_offset = local_timer - peer_timer;
 
-    // NRF_LOG_INFO("timer_offset: %d (wrapped: %d)", timer_offset, wrapped);
-    // NRF_LOG_INFO("Local: %lu, Remote: %lu", local_timer, peer_timer);
+    // NRF_LOG_INFO("Local=%lu,Remote=%lu,diff=%d", local_timer, peer_timer, timer_offset);
 
-    if (abs(timer_offset) <= 2 || timer_offset == TIME_SYNC_TIMER_MAX_VAL)
+    if (local_timer > TIME_SYNC_TIMER_MAX_VAL)
+    {
+        // Todo: Investigate if this is a corner case with a root cause that needs to be handled
+        nrf_atomic_flag_clear(&m_timer_update_in_progress);
+        return false;
+    }
+
+    if (timer_offset == TIME_SYNC_TIMER_MAX_VAL || timer_offset == 0)
     {
         // Already in sync
         nrf_atomic_u32_add(&m_used_packet_count, 1);
-        // nrf_atomic_u32_store(&m_last_sync, p_pkt->counter_val);
+        nrf_atomic_flag_clear(&m_timer_update_in_progress);
         return false;
     }
 
@@ -842,49 +849,59 @@ static inline bool sync_timer_offset_compensate(sync_pkt_t * p_pkt)
     {
         // Too close
         // Todo: see if local counter increment can be accounted for
-        // NRF_LOG_INFO("SKIPPED");
+        nrf_atomic_flag_clear(&m_timer_update_in_progress);
         return false;
     }
 
-    if (timer_offset < 0)
-    {
-        // Local timer is ahead of peer: cut current cycle short
-        m_params.high_freq_timer[0]->CC[2] = TIME_SYNC_TIMER_MAX_VAL + timer_offset;
-        ppi_sync_timer_adjust_configure(true);
-    }
-    else
-    {
-        // Local timer is behind peer: cut next cycle short
-        m_params.high_freq_timer[0]->CC[2] = timer_offset;
-        ppi_sync_timer_adjust_configure(false);
-    }
+    bool shorten_cycle = timer_offset < 0;
 
-    APP_ERROR_CHECK_BOOL(m_params.high_freq_timer[0]->CC[2] < TIME_SYNC_TIMER_MAX_VAL);
+    m_params.high_freq_timer[0]->CC[2] = TIME_SYNC_TIMER_MAX_VAL + timer_offset;
+    ppi_sync_timer_adjust_configure(shorten_cycle);
 
-    nrf_atomic_flag_set(&m_timer_update_in_progress);
     nrf_atomic_u32_fetch_store(&mp_curr_adj_pkt, (uint32_t) p_pkt);
 
     nrf_atomic_u32_store(&m_curr_adj_timer, m_params.high_freq_timer[0]->CC[1]);
     nrf_atomic_u32_store(&m_curr_adj_counter, m_params.high_freq_timer[1]->CC[1]);
 
-    ppi_sync_timer_adjust_enable();
+    uint32_t cc_val;
+
+    do
+    {
+        // Avoid race condition when disabling and re-enabling PPI channel very quickly
+        m_params.high_freq_timer[0]->TASKS_CAPTURE[4] = 1;
+        cc_val = m_params.high_freq_timer[0]->CC[4];
+    } while ((cc_val > (TIME_SYNC_TIMER_MAX_VAL - 15)));
+
+    if (shorten_cycle)
+    {
+        m_params.high_freq_timer[0]->CC[0] = TIME_SYNC_TIMER_MAX_VAL + 10;
+        ppi_sync_timer_adjust_enable();
+    }
+    else
+    {
+        ppi_sync_timer_adjust_enable();
+        ppi_sync_timer_clear_disable();
+    }
 
     return true;
 }
 
-static void ppi_sync_timer_adjust_configure(bool do_count)
+static void ppi_sync_timer_adjust_configure(bool shorten)
 {
-    uint32_t chn0, chn1, chg;
+    uint32_t chn0, chn1, chn2, chg0, chg1;
 
     chn0 = m_params.ppi_chns[0];
     chn1 = m_params.ppi_chns[1];
-    chg  = m_params.ppi_chg;
+    chn2 = m_params.ppi_chns[6];
+    chg0  = m_params.ppi_chgs[0];
+    chg1  = m_params.ppi_chgs[1];
 
     // PPI channel 0: clear timer when compare[2] value is reached
     NRF_PPI->CHENCLR        = (1 << chn0);
     NRF_PPI->CH[chn0].EEP   = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
     NRF_PPI->CH[chn0].TEP   = (uint32_t) &m_params.high_freq_timer[0]->TASKS_CLEAR;
-    if (do_count)
+
+    if (shorten)
     {
         NRF_PPI->FORK[chn0].TEP = (uint32_t) &m_params.high_freq_timer[1]->TASKS_COUNT;
     }
@@ -896,11 +913,25 @@ static void ppi_sync_timer_adjust_configure(bool do_count)
     // PPI channel 1: disable PPI channel 0 such that the timer is only reset once, and trigger software interrupt
     NRF_PPI->CHENCLR        = (1 << chn1);
     NRF_PPI->CH[chn1].EEP   = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
-    NRF_PPI->CH[chn1].TEP   = (uint32_t) &NRF_PPI->TASKS_CHG[chg].DIS;	// disable PPI group
+    NRF_PPI->CH[chn1].TEP   = (uint32_t) &NRF_PPI->TASKS_CHG[chg0].DIS;	// disable PPI group
     NRF_PPI->FORK[chn1].TEP = (uint32_t) &m_params.egu->TASKS_TRIGGER[0]; // trigger EGU interrupt
 
-    NRF_PPI->TASKS_CHG[chg].DIS = 1;
-    NRF_PPI->CHG[chg]           = (1 << chn0) | (1 << chn1);
+    if (shorten)
+    {
+        NRF_PPI->CHENCLR        = (1 << chn2);
+        NRF_PPI->CH[chn2].EEP   = 0;
+        NRF_PPI->CH[chn2].TEP   = 0;
+    }
+    else
+    {
+        // PPI channel 2: Re-enable EVENTS_COMPARE[0] after lengthening cycle
+        NRF_PPI->CHENCLR        = (1 << chn2);
+        NRF_PPI->CH[chn2].EEP   = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[2];
+        NRF_PPI->CH[chn2].TEP   = (uint32_t) &NRF_PPI->TASKS_CHG[chg1].EN;	// enable PPI group
+    }
+
+    NRF_PPI->TASKS_CHG[chg0].DIS = 1;
+    NRF_PPI->CHG[chg0]           = (1 << chn0) | (1 << chn1) | (1 << chn2);
 }
 
 static void ppi_radio_rx_configure(void)
@@ -980,13 +1011,30 @@ static void ppi_radio_rx_disable(void)
 
 static void ppi_sync_timer_adjust_enable(void)
 {
-    NRF_PPI->TASKS_CHG[m_params.ppi_chg].EN = 1;
+    NRF_PPI->TASKS_CHG[m_params.ppi_chgs[0]].EN = 1;
 }
 
-// static void ppi_sync_timer_adjust_disable(void)
-// {
-//     NRF_PPI->TASKS_CHG[m_params.ppi_chg].DIS = 1;
-// }
+static void ppi_sync_timer_clear_configure(void)
+{
+    uint32_t chn;
+    uint32_t chg;
+
+    chn = m_params.ppi_chns[5];
+    chg = m_params.ppi_chgs[1];
+
+    NRF_PPI->CHENCLR        = (1 << chn);
+    NRF_PPI->CH[chn].EEP   = (uint32_t) &m_params.high_freq_timer[0]->EVENTS_COMPARE[0];
+    NRF_PPI->CH[chn].TEP   = (uint32_t) &m_params.high_freq_timer[0]->TASKS_CLEAR;
+    NRF_PPI->CHENSET        = (1 << chn);
+
+    NRF_PPI->CHG[chg]           = (1 << chn);
+    NRF_PPI->TASKS_CHG[chg].EN = 1;
+}
+
+static void ppi_sync_timer_clear_disable(void)
+{
+    NRF_PPI->TASKS_CHG[m_params.ppi_chgs[1]].DIS = 1;
+}
 
 uint32_t ppi_sync_trigger_configure(uint32_t ppi_endpoint)
 {
@@ -1049,6 +1097,8 @@ static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer
 
 uint32_t ts_init(const ts_init_t * p_init)
 {
+    nrfx_err_t ret;
+
     if (p_init->high_freq_timer[0] == 0 ||
         p_init->high_freq_timer[1] == 0 ||
         p_init->egu                == 0 ||
@@ -1062,10 +1112,14 @@ uint32_t ts_init(const ts_init_t * p_init)
     m_params.egu_irq_type = p_init->egu_irq_type;
     m_callback = p_init->evt_handler;
 
-    nrfx_err_t ret = nrfx_ppi_group_alloc(&m_params.ppi_chg);
-    if (ret != NRFX_SUCCESS)
+    for (size_t i = 0; i < sizeof(m_params.ppi_chgs) / sizeof(m_params.ppi_chgs[0]); i++)
     {
-        return NRF_ERROR_INTERNAL;
+        ret = nrfx_ppi_group_alloc(&m_params.ppi_chgs[i]);
+        if (ret != NRFX_SUCCESS)
+        {
+            return NRF_ERROR_INTERNAL;
+        }
+        NRF_LOG_INFO("PPI CHG[%d]=%d", i, m_params.ppi_chgs[i]);
     }
 
     for (size_t i = 0; i < sizeof(m_params.ppi_chns) / sizeof(m_params.ppi_chns[0]); i++)
@@ -1075,6 +1129,7 @@ uint32_t ts_init(const ts_init_t * p_init)
         {
             return NRF_ERROR_INTERNAL;
         }
+        NRF_LOG_INFO("PPI CH[%d]=%d", i, m_params.ppi_chns[i]);
     }
 
     if (m_params.egu != NRF_EGU3)
@@ -1136,7 +1191,6 @@ uint32_t ts_enable(const ts_rf_config_t* p_rf_config)
     }
 
     ppi_timestamp_timer_configure();
-    // ppi_sync_timer_adjust_configure();
 
     NVIC_ClearPendingIRQ(m_params.egu_irq_type);
     NVIC_SetPriority(m_params.egu_irq_type, TIME_SYNC_EVT_HANDLER_IRQ_PRIORITY);
@@ -1151,6 +1205,7 @@ uint32_t ts_enable(const ts_rf_config_t* p_rf_config)
     nrf_atomic_flag_clear(&m_send_sync_pkt);
 
     timestamp_counter_start();
+    ppi_sync_timer_clear_configure();
     sync_timer_start();
 
     nrf_atomic_flag_set(&m_timeslot_session_open);
@@ -1203,7 +1258,7 @@ uint32_t ts_tx_start(uint32_t sync_freq_hz)
     if (sync_freq_hz == TIME_SYNC_FREQ_AUTO)
     {
         // 20-30 Hz is a good range
-        // Higher frequency gives more margin for missed packets, but doesn't improve accuracy
+        // Higher frequency gives more margin for missed packets, but doesn't improve accuracy that much
         uint32_t auto_freq_target = 30;
         distance = (ROUNDED_DIV(ROUNDED_DIV(1000000, auto_freq_target), (TIME_SYNC_TIMER_MAX_VAL / 16))) * (TIME_SYNC_TIMER_MAX_VAL / 16);
     }

@@ -187,7 +187,7 @@ uint32_t ts_tx_stop(void);
  *          Time in milliseconds = target_tick * 16000000 / (TIME_SYNC_TIMER_MAX_VAL * 1000)
  *
  * @note When @ref ts_timestamp_get_ticks_u64 or @ref ts_timestamp_get_ticks_u32 is used as a reference,
- *       use @ref TIME_SYNC_TIMESTAMP_TO_USEC to convert to time unit for this function.
+ *       use @ref TIME_SYNC_TIMESTAMP_TO_TICK to convert to time unit for this function.
  *
  * @note Time sync receivers will adjust their local time according to the timing transmitter.
  *       If a trigger is set before a receiver is in sync with the transmitter, the local receiver timebase can skip ahead of the trigger time,
