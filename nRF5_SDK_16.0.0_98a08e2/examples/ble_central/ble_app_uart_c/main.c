@@ -706,14 +706,14 @@ static void ts_gpio_trigger_enable(void)
         return;
     }
 
-    // Round up to nearest second to next 250 ms to start toggling.
+    // Round up to nearest second to next 1000 ms to start toggling.
     // If the receiver has received a valid sync packet within this time, the GPIO toggling polarity will be the same.
 
     time_now_ticks = ts_timestamp_get_ticks_u64();
     time_now_msec = TIME_SYNC_TIMESTAMP_TO_USEC(time_now_ticks) / 1000;
 
-    time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (250 * 2);
-    time_target = (time_target / 250) * 250;
+    time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (1000 * 2);
+    time_target = (time_target / 1000) * 1000;
 
     err_code = ts_set_trigger(time_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
     APP_ERROR_CHECK(err_code);
@@ -745,7 +745,7 @@ static void ts_evt_callback(const ts_evt_t* evt)
             {
                 uint32_t tick_target;
 
-                tick_target = evt->params.triggered.tick_target + 2;
+                tick_target = evt->params.triggered.tick_target + 1;
 
                 uint32_t err_code = ts_set_trigger(tick_target, nrf_gpiote_task_addr_get(NRF_GPIOTE_TASKS_OUT_3));
                 APP_ERROR_CHECK(err_code);
