@@ -1,0 +1,56 @@
+# Copyright (c) 2021 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  self:
+    path: timesync_sample
+
+  remotes:
+    - name: ncs
+      url-base: https://github.com/nrfconnect
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  defaults:
+    remote: ncs
+
+  projects:
+    - name: zephyr
+      repo-path: sdk-zephyr
+      revision: v3.0.99-ncs1-1
+      import:
+        # In addition to the zephyr repository itself, NCS also
+        # imports the contents of zephyr/west.yml at the above
+        # revision. Only the projects explicitly named in the
+        # following allowlist are imported.
+        #
+        # Note that the zephyr west extensions (like 'build', 'flash',
+        # 'debug', etc.) are automatically provided by this import, so
+        # there's no need to add a redundant west-commands: key for
+        # the zephyr project.
+        #
+        # Please keep this list sorted alphabetically.
+        name-allowlist:
+          - cmsis
+          - hal_nordic
+          - tinycrypt
+          - segger
+          - open-amp
+          - libmetal
+    - name: sdk-nrf
+      repo-path: sdk-nrf
+      path: nrf
+      revision: v2.0.2
+      import: false
+    - name: nrfxlib
+      repo-path: sdk-nrfxlib
+      path: nrfxlib
+      revision: v2.0.2
+    - name: mbedtls-nrf
+      path: mbedtls
+      repo-path: sdk-mbedtls
+      revision: v3.0.0-ncs2
+    - name: trusted-firmware-m
+      repo-path: sdk-trusted-firmware-m
+      path: modules/tee/tf-m/trusted-firmware-m
+      revision: v1.5.0-ncs2
