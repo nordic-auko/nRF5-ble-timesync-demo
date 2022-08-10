@@ -1,0 +1,37 @@
+#
+# Copyright (c) 2022 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+config TIMESYNC_FREEWHEEL_TIMER
+	int "Freewheel timer instance"
+	range 3 4
+	default 3
+	help
+	  NRF_TIMER instance for freewheel timer.
+
+config TIMESYNC_COUNTER_TIMER
+	int "Counter timer instance"
+	range 3 4
+	default 4
+	help
+	  NRF_TIMER instance for counter timer.
+
+config TIMESYNC_EGU
+	int "EGU instance"
+	range 0 3
+	default 3
+	help
+	  NRF_EGU instance.
+
+config TIMESYNC_SWI
+	int "SWI instance"
+	range 0 3
+	default 1
+	help
+	  NRF_SWI instance.
+
+module=TIMESYNC
+module-str=TIMESYNC
+source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
