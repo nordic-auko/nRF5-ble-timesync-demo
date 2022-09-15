@@ -44,3 +44,8 @@ The GPIO assignment is as follows:
 Connect an oscilloscope or logic analyzer to the toggling GPIO and observe the delay between each GPIO edge.
 
 ![Oscilloscope measurement](scope_screenshot.jpg)
+
+
+Example measurement taken under ideal conditions, in this case no competing Bluetooth radio activity and packet rate set to 100 Hz.
+
+![Oscilloscope measurement](scope_screenshot_2.png)
