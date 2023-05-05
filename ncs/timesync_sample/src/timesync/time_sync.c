@@ -20,8 +20,8 @@
 #include <hal/nrf_radio.h>
 #include <hal/nrf_timer.h>
 
-#include <drivers/clock_control.h>
-#include <drivers/clock_control/nrf_clock_control.h>
+#include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 
 #include <mpsl_timeslot.h>
 #include <mpsl.h>

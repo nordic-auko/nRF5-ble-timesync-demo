@@ -13,7 +13,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 
-#include <shell/shell.h>
+#include <zephyr/shell/shell.h>
 
 #include <bluetooth/services/nus.h>
 
@@ -79,7 +79,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	LOG_INF("Connected %s", log_strdup(addr));
+	LOG_INF("Connected %s", addr);
 
 	current_conn = bt_conn_ref(conn);
 }
@@ -90,7 +90,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-	LOG_INF("Disconnected: %s (reason %u)", log_strdup(addr), reason);
+	LOG_INF("Disconnected: %s (reason %u)", addr, reason);
 
 	if (auth_conn) {
 		bt_conn_unref(auth_conn);
@@ -115,7 +115,7 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
 
-	LOG_INF("Received %d bytes from: %s", len, log_strdup(addr));
+	LOG_INF("Received %d bytes from: %s", len, addr);
 }
 
 static struct bt_nus_cb nus_cb = {
