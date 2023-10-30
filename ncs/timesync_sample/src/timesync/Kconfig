@@ -8,6 +8,8 @@ config TIMESYNC_FREEWHEEL_TIMER
 	int "Freewheel timer instance"
 	range 3 4
 	default 3
+	range 1 2 if SOC_NRF5340_CPUNET
+	default 1 if SOC_NRF5340_CPUNET
 	help
 	  NRF_TIMER instance for freewheel timer.
 
@@ -15,12 +17,15 @@ config TIMESYNC_COUNTER_TIMER
 	int "Counter timer instance"
 	range 3 4
 	default 4
+	range 1 2 if SOC_NRF5340_CPUNET
+	default 2 if SOC_NRF5340_CPUNET
 	help
 	  NRF_TIMER instance for counter timer.
 
 config TIMESYNC_EGU
 	int "EGU instance"
 	range 0 3
+	default 0 if SOC_NRF5340_CPUNET
 	default 3
 	help
 	  NRF_EGU instance.
@@ -28,6 +33,7 @@ config TIMESYNC_EGU
 config TIMESYNC_SWI
 	int "SWI instance"
 	range 0 3
+	range 1 4 if SOC_NRF5340_CPUNET
 	default 1
 	help
 	  NRF_SWI instance.

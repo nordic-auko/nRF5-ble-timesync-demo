@@ -12,11 +12,19 @@
 #include <stdlib.h>
 
 #include <nrfx.h>
+#include <nrfx_timer.h>
+
+#include <helpers/nrfx_gppi.h>
+#if defined(DPPI_PRESENT)
+#include <nrfx_dppi.h>
+#include <hal/nrf_dppi.h>
+#else
 #include <nrfx_ppi.h>
+#include <hal/nrf_ppi.h>
+#endif
 
 #include <hal/nrf_egu.h>
 #include <hal/nrf_power.h>
-#include <hal/nrf_ppi.h>
 #include <hal/nrf_radio.h>
 #include <hal/nrf_timer.h>
 
@@ -63,9 +71,16 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #endif /* CONFIG_TIMESYNC_SWI == CONFIG_TIMESYNC_EGU */
 #endif /* defined(CONFIG_SOC_SERIES_NRF53X) */
 
+
+#if defined(CONFIG_SOC_SERIES_NRF53X)
+#define EGU_INST NRF_EGU0
+#else
+#define EGU_INST NRFX_CONCAT_2(NRF_EGU, CONFIG_TIMESYNC_EGU)
+#endif
+
+
 #define FREEWHEEL_TIMER NRFX_CONCAT_2(NRF_TIMER, CONFIG_TIMESYNC_FREEWHEEL_TIMER)
 #define COUNTER_TIMER NRFX_CONCAT_2(NRF_TIMER, CONFIG_TIMESYNC_COUNTER_TIMER)
-#define EGU_INST NRFX_CONCAT_2(NRF_EGU, CONFIG_TIMESYNC_EGU)
 
 static void ppi_sync_timer_adjust_configure(bool shorten);
 static void ppi_sync_timer_adjust_enable(void);
@@ -79,8 +94,13 @@ static int ppi_sync_trigger_configure(uint32_t ppi_endpoint);
 struct {
 	uint8_t rf_chn;
 	uint8_t rf_addr[5];
+	#if defined(DPPI_PRESENT)
+	uint8_t ppi_chns[7];
+	nrf_dppi_channel_group_t ppi_chgs[2];
+	#else
 	nrf_ppi_channel_t ppi_chns[7];
 	nrf_ppi_channel_group_t ppi_chgs[2];
+	#endif
 } m_params;
 
 #if CONFIG_TIMESYNC_FREEWHEEL_TIMER == CONFIG_TIMESYNC_COUNTER_TIMER
@@ -125,7 +145,12 @@ static atomic_t m_last_sync = 0;
 static atomic_t m_prev_sync_pkt_timer;
 static atomic_t m_prev_sync_pkt_counter;
 
+#if defined(DPPI_PRESENT)
+static uint8_t m_timestamp_trigger_ppi[2];
+#else
 static nrf_ppi_channel_t m_timestamp_trigger_ppi[2];
+#endif
+
 static bool m_timestamp_trigger_set = false;
 
 static struct onoff_manager *clk_mgr;
@@ -169,7 +194,12 @@ RING_BUF_DECLARE(callback_low_priority_ring_buf, 10);
 static void timeslot_begin_handler(void);
 static void timeslot_end_handler(void);
 static void timeslot_radio_handler(void);
+
+#if defined(DPPI_PRESENT)
+static void ppi_counter_timer_triggered_capture_configure(uint8_t chn[2], uint32_t eep);
+#else
 static void ppi_counter_timer_triggered_capture_configure(nrf_ppi_channel_t chn[2], uint32_t eep);
+#endif
 static bool sync_timer_offset_compensate(struct sync_pkt * p_pkt);
 static struct sync_pkt * tx_buf_get(void);
 
@@ -288,7 +318,12 @@ ISR_DIRECT_DECLARE(egu_isr)
 	{
 		nrf_egu_event_clear(EGU_INST, NRF_EGU_EVENT_TRIGGERED2);
 
+		#if defined(DPPI_PRESENT)
+		nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL << m_params.ppi_chns[4]));
+		#else
 		nrf_ppi_channel_disable(NRF_PPI, m_params.ppi_chns[4]);
+		#endif
+
 
 		if (m_callback)
 		{
@@ -772,18 +807,24 @@ int ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint)
 
 	nrf_timer_cc_set(COUNTER_TIMER, NRF_TIMER_CC_CHANNEL4, (target_tick - m_master_counter_diff));
 	atomic_set(&m_tick_target, target_tick);
+
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_enable(NRF_DPPIC, (0x1UL << m_params.ppi_chns[4])); // activate trigger
+	#else
 	nrf_ppi_channel_enable(NRF_PPI, m_params.ppi_chns[4]); // activate trigger
+	#endif
+
 	return 0;
 }
 
 int ts_set_timestamp_trigger(uint32_t ppi_event_endpoint)
 {
 	// TODO: Check if other timers can be used also
-	if (FREEWHEEL_TIMER != NRF_TIMER3 && FREEWHEEL_TIMER != NRF_TIMER4)
+	if (FREEWHEEL_TIMER != NRF_TIMER1 && FREEWHEEL_TIMER != NRF_TIMER2)
 	{
 		return -EBUSY;
 	}
-	if (COUNTER_TIMER != NRF_TIMER3 && COUNTER_TIMER != NRF_TIMER4)
+	if (COUNTER_TIMER != NRF_TIMER1 && COUNTER_TIMER != NRF_TIMER2)
 	{
 		return -EBUSY;
 	}
@@ -794,11 +835,17 @@ int ts_set_timestamp_trigger(uint32_t ppi_event_endpoint)
 
 		for (int i = 0; i < ARRAY_SIZE(m_timestamp_trigger_ppi); ++i)
 		{
-			err = nrfx_ppi_channel_alloc(&m_timestamp_trigger_ppi[i]);
-			if (err != NRFX_SUCCESS)
-			{
-				return err;
-			}
+				/* Allocate a (D)PPI channel. */
+				#if defined(DPPI_PRESENT)
+					err = nrfx_dppi_channel_alloc(&m_timestamp_trigger_ppi[i]);
+				#else
+					err = nrfx_ppi_channel_alloc(&m_timestamp_trigger_ppi[i]);
+				#endif
+
+				if (err != NRFX_SUCCESS)
+				{
+					return err;
+				}
 		}
 	}
 
@@ -891,8 +938,14 @@ static inline bool sync_timer_offset_compensate(struct sync_pkt * p_pkt)
 
 static void ppi_sync_timer_adjust_configure(bool shorten)
 {
-	nrf_ppi_channel_t chn0, chn1, chn2;
-	nrf_ppi_channel_group_t chg0, chg1;
+	#if defined(DPPI_PRESENT)
+
+	uint8_t  chn0, chn1, chn2;
+	nrf_dppi_channel_group_t chg0, chg1;
+	#else
+		nrf_ppi_channel_t chn0, chn1, chn2;
+		nrf_ppi_channel_group_t chg0, chg1;
+	#endif
 
 	chn0 = m_params.ppi_chns[0];
 	chn1 = m_params.ppi_chns[1];
@@ -901,47 +954,87 @@ static void ppi_sync_timer_adjust_configure(bool shorten)
 	chg1  = m_params.ppi_chgs[1];
 
 	// PPI channel 0: clear timer when compare[2] value is reached
-
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL << chn0));
+	#else
 	nrf_ppi_channel_disable(NRF_PPI, chn0);
+	#endif
 
-	nrf_ppi_channel_endpoint_setup(NRF_PPI, chn0,
+
+
+	nrfx_gppi_channel_endpoints_setup(chn0,
 		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE2),
 		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CLEAR));
 	if (shorten)
 	{
-		nrf_ppi_fork_endpoint_setup(NRF_PPI, chn0,
+		nrfx_gppi_fork_endpoint_setup(chn0,
 			nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_COUNT));
 	}
 	else
 	{
-		nrf_ppi_fork_endpoint_setup(NRF_PPI, chn0, 0);
+		nrfx_gppi_fork_endpoint_setup(chn0, 0);
 	}
 
 	// PPI channel 1: disable PPI channel 0 such that the timer is only reset once, and trigger software interrupt
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL <<chn1));
+	#else
 	nrf_ppi_channel_disable(NRF_PPI, chn1);
-	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn1,
+	#endif
+	
+
+
+	#if defined(DPPI_PRESENT)
+	nrfx_gppi_channel_endpoints_setup(chn1,
+		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE2),
+		nrfx_gppi_group_disable_task_get(chg0));
+	nrfx_gppi_fork_endpoint_setup(chn1,nrf_egu_task_address_get(EGU_INST, NRF_EGU_TASK_TRIGGER0));
+	#else
+		nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn1,
 		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE2),
 		nrf_ppi_task_group_disable_address_get(NRF_PPI, chg0),
 		nrf_egu_task_address_get(EGU_INST, NRF_EGU_TASK_TRIGGER0));
+	#endif
 
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL <<chn2));
+	#else
 	nrf_ppi_channel_disable(NRF_PPI, chn2);
+	#endif
 
 	if (shorten)
 	{
-		nrf_ppi_channel_endpoint_setup(NRF_PPI, chn2, 0, 0);
+		// this asserts, find function to unset ?
+		//nrfx_gppi_channel_endpoints_setup( chn2, 0, 0);
 	}
 	else
 	{
-		// PPI channel 2: Re-enable EVENTS_COMPARE[0] after lengthening cycle
-		nrf_ppi_channel_endpoint_setup(NRF_PPI, chn2,
+			#if defined(DPPI_PRESENT)
+			nrfx_gppi_channel_endpoints_setup(chn2,
 			nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE2),
-			nrf_ppi_task_group_enable_address_get(NRF_PPI, chg1));
+				nrfx_gppi_group_disable_task_get(chg1));
+			#else
+			// PPI channel 2: Re-enable EVENTS_COMPARE[0] after lengthening cycle
+			nrf_ppi_channel_endpoint_setup(NRF_PPI, chn2,
+				nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE2),
+				nrf_ppi_task_group_enable_address_get(NRF_PPI, chg1));
+			#endif
 	}
 
-	nrf_ppi_group_disable(NRF_PPI, chg0);
-	nrf_ppi_channels_include_in_group(NRF_PPI,
+	#if defined(DPPI_PRESENT)
+		nrf_dppi_group_disable(NRF_DPPIC,chg0);
+
+		nrfx_gppi_channels_include_in_group(
 		BIT(chn0) | BIT(chn1) | BIT(chn2),
 		chg0);
+	#else
+		nrf_ppi_group_disable(NRF_PPI, chg0);
+		
+		nrf_ppi_channels_include_in_group(NRF_PPI,
+		BIT(chn0) | BIT(chn1) | BIT(chn2),
+		chg0);
+	#endif
+
 }
 
 static void ppi_radio_rx_configure(void)
@@ -950,11 +1043,21 @@ static void ppi_radio_rx_configure(void)
 
 	chn = m_params.ppi_chns[2];
 
-	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn,
+	#if defined(DPPI_PRESENT)
+		nrfx_gppi_channel_endpoints_setup(chn,
+		nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS),
+		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE1));
+	nrfx_gppi_fork_endpoint_setup(chn,nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE1));
+
+	nrfx_dppi_channel_enable(chn);
+	#else
+		nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn,
 		nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_ADDRESS),
 		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE1),
 		nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE1));
-	nrf_ppi_channel_enable(NRF_PPI, chn);
+
+		nrf_ppi_channel_enable(NRF_PPI, chn);
+	#endif
 }
 
 static void ppi_radio_tx_configure(void)
@@ -963,11 +1066,23 @@ static void ppi_radio_tx_configure(void)
 
 	chn = m_params.ppi_chns[0];
 
+
+		#if defined(DPPI_PRESENT)
+		nrfx_gppi_channel_endpoints_setup(chn,
+		nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_READY),
+		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE1));
+	nrfx_gppi_fork_endpoint_setup(chn,nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE1));
+
+	nrfx_dppi_channel_enable(chn);
+	#else
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn,
 		nrf_radio_event_address_get(NRF_RADIO, NRF_RADIO_EVENT_READY),
 		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE1),
 		nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE1));
 	nrf_ppi_channel_enable(NRF_PPI, chn);
+	#endif
+
+
 }
 
 static void ppi_timestamp_timer_configure(void)
@@ -976,24 +1091,69 @@ static void ppi_timestamp_timer_configure(void)
 
 	chn = m_params.ppi_chns[3];
 
+
+
+
+	#if defined(DPPI_PRESENT)
+		nrfx_gppi_channel_endpoints_setup(chn,
+		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE0),
+		nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_COUNT));
+
+		nrfx_dppi_channel_enable(chn);
+	#else
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn,
 		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE0),
 		nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_COUNT),
 		0);
 	nrf_ppi_channel_enable(NRF_PPI, chn);
+	#endif
+
+
 }
 
 static void ppi_counter_timer_capture_configure(uint32_t chn)
 {
+
+
+
+		#if defined(DPPI_PRESENT)
+	nrfx_gppi_channel_endpoints_setup(chn,
+		nrf_egu_event_address_get(EGU_INST, NRF_EGU_EVENT_TRIGGERED1),
+		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE3));
+	nrfx_gppi_fork_endpoint_setup(chn,nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE0));
+	nrfx_dppi_channel_enable(chn);
+	#else
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn,
 		nrf_egu_event_address_get(EGU_INST, NRF_EGU_EVENT_TRIGGERED1),
 		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE3),
 		nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE0));
 	nrf_ppi_channel_enable(NRF_PPI, chn);
+	#endif
+
+
 }
 
+#if defined(DPPI_PRESENT)
+static void ppi_counter_timer_triggered_capture_configure(uint8_t chn[2], uint32_t eep)
+{
+
+
+
+	nrfx_gppi_channel_endpoints_setup(chn[0],
+		eep,
+		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE5));
+	nrfx_gppi_fork_endpoint_setup(chn[0],nrf_timer_task_address_get(COUNTER_TIMER, NRF_TIMER_TASK_CAPTURE5));
+
+	nrfx_gppi_channel_endpoints_setup(chn[1],
+		eep,
+		nrf_egu_task_address_get(EGU_INST, NRF_EGU_TASK_TRIGGER5));
+
+	nrf_dppi_channels_enable(NRF_DPPIC, BIT(chn[0]) | BIT(chn[1]));
+}
+#else
 static void ppi_counter_timer_triggered_capture_configure(nrf_ppi_channel_t chn[2], uint32_t eep)
 {
+
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn[0],
 		eep,
 		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CAPTURE5),
@@ -1005,23 +1165,48 @@ static void ppi_counter_timer_triggered_capture_configure(nrf_ppi_channel_t chn[
 		0);
 
 	nrf_ppi_channels_enable(NRF_PPI, BIT(chn[0]) | BIT(chn[1]));
-}
+	}
+#endif
+
 
 static void ppi_counter_timer_capture_disable(uint32_t chn)
 {
-	nrf_ppi_channel_disable(NRF_PPI, chn);
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL <<chn));
+    
+	// this asserts, find function to unset ?
+	//nrfx_gppi_channel_endpoints_setup(chn, 0, 0);
+	//nrfx_gppi_fork_endpoint_setup(chn,0);
 
+
+	#else
+	nrf_ppi_channel_disable(NRF_PPI, chn);
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, chn, 0, 0, 0);
+
+	#endif
+
+	
 }
 
 static void ppi_radio_rx_disable(void)
 {
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL << m_params.ppi_chns[2]));
+	#else
 	nrf_ppi_channel_disable(NRF_PPI, m_params.ppi_chns[2]);
+	#endif
 }
 
 static void ppi_sync_timer_adjust_enable(void)
 {
-	nrf_ppi_group_enable(NRF_PPI, m_params.ppi_chgs[0]);
+	#if defined(DPPI_PRESENT)
+	nrfx_gppi_group_enable(m_params.ppi_chgs[0]);
+	#else
+		nrf_ppi_group_enable(NRF_PPI, m_params.ppi_chgs[0]);
+	#endif
+
+
+
 }
 
 static void ppi_sync_timer_clear_configure(void)
@@ -1032,29 +1217,57 @@ static void ppi_sync_timer_clear_configure(void)
 	chn = m_params.ppi_chns[5];
 	chg = m_params.ppi_chgs[1];
 
+	#if defined(DPPI_PRESENT)
+	nrf_dppi_channels_disable(NRF_DPPIC,(0x1UL << chn));
+
+	nrfx_gppi_channel_endpoints_setup(chn,
+	nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE0),
+	nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CLEAR));
+
+	nrfx_dppi_channel_enable(chn);
+
+	nrfx_gppi_channels_include_in_group(BIT(chn), chg);
+	nrfx_gppi_group_enable(chg);
+
+	#else
 	nrf_ppi_channel_disable(NRF_PPI, chn);
+
 	nrf_ppi_channel_endpoint_setup(NRF_PPI, chn,
-		nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE0),
-		nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CLEAR));
+	nrf_timer_event_address_get(FREEWHEEL_TIMER, NRF_TIMER_EVENT_COMPARE0),
+	nrf_timer_task_address_get(FREEWHEEL_TIMER, NRF_TIMER_TASK_CLEAR));
+
 	nrf_ppi_channel_enable(NRF_PPI, chn);
 
+	
 	nrf_ppi_channel_include_in_group(NRF_PPI, chn, chg);
 	nrf_ppi_group_enable(NRF_PPI, chg);
+	#endif
+
+	
 }
 
 static void ppi_sync_timer_clear_disable(void)
 {
-	nrf_ppi_group_disable(NRF_PPI, m_params.ppi_chgs[1]);
+	#if defined(DPPI_PRESENT)
+		nrf_dppi_group_disable(NRF_DPPIC,m_params.ppi_chgs[1]);
+	#else
+		nrf_ppi_group_disable(NRF_PPI, m_params.ppi_chgs[1]);
+	#endif
 }
 
 int ppi_sync_trigger_configure(uint32_t ppi_endpoint)
 {
-
+	#if defined(DPPI_PRESENT)
+	nrfx_gppi_channel_endpoints_setup(m_params.ppi_chns[4],
+		nrf_timer_event_address_get(COUNTER_TIMER, NRF_TIMER_EVENT_COMPARE4),
+		ppi_endpoint);
+	nrfx_gppi_fork_endpoint_setup(m_params.ppi_chns[4],nrf_egu_task_address_get(EGU_INST, NRF_EGU_TASK_TRIGGER2));
+	#else
 	nrf_ppi_channel_and_fork_endpoint_setup(NRF_PPI, m_params.ppi_chns[4],
 		nrf_timer_event_address_get(COUNTER_TIMER, NRF_TIMER_EVENT_COMPARE4),
 		ppi_endpoint,
 		nrf_egu_task_address_get(EGU_INST, NRF_EGU_TASK_TRIGGER2));
-
+	#endif
 	return 0;
 }
 
@@ -1070,8 +1283,13 @@ static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer
 		__ASSERT_NO_MSG(false);
 	}
 
+	#if defined(DPPI_PRESENT)
+	uint8_t  ppi_chn;
+	nrfx_err_t ret = nrfx_dppi_channel_alloc(&ppi_chn);
+	#else
 	nrf_ppi_channel_t ppi_chn;
 	nrfx_err_t ret = nrfx_ppi_channel_alloc(&ppi_chn);
+	#endif
 	__ASSERT_NO_MSG(ret == NRFX_SUCCESS);
 
 	ppi_counter_timer_capture_configure(ppi_chn);
@@ -1095,7 +1313,16 @@ static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer
 
 
 	ppi_counter_timer_capture_disable(ppi_chn);
+
+	
+	#if defined(DPPI_PRESENT)
+	nrfx_dppi_channel_free(ppi_chn);
+	#else
 	nrfx_ppi_channel_free(ppi_chn);
+	#endif
+
+
+	
 
 	*p_sync_timer_val = nrf_timer_cc_get(FREEWHEEL_TIMER, NRF_TIMER_CC_CHANNEL3);
 	*p_count_timer_val = nrf_timer_cc_get(COUNTER_TIMER, NRF_TIMER_CC_CHANNEL0);
@@ -1110,6 +1337,27 @@ int ts_init(ts_evt_handler_t evt_handler)
 
 	m_callback = evt_handler;
 
+	
+#if defined(DPPI_PRESENT)
+	for (size_t i = 0; i < sizeof(m_params.ppi_chgs) / sizeof(m_params.ppi_chgs[0]); i++)
+	{
+		ret = nrfx_dppi_group_alloc(&m_params.ppi_chgs[i]);
+		if (ret != NRFX_SUCCESS)
+		{
+			return -EBUSY;
+		}
+	}
+
+	for (size_t i = 0; i < sizeof(m_params.ppi_chns) / sizeof(m_params.ppi_chns[0]); i++)
+	{
+		ret = nrfx_dppi_channel_alloc(&m_params.ppi_chns[i]);
+		if (ret != NRFX_SUCCESS)
+		{
+			return -EBUSY;
+		}
+	}
+
+#else
 	for (size_t i = 0; i < sizeof(m_params.ppi_chgs) / sizeof(m_params.ppi_chgs[0]); i++)
 	{
 		ret = nrfx_ppi_group_alloc(&m_params.ppi_chgs[i]);
@@ -1127,6 +1375,8 @@ int ts_init(ts_evt_handler_t evt_handler)
 			return -EBUSY;
 		}
 	}
+#endif
+
 
 	IRQ_DIRECT_CONNECT(TS_SWI_IRQn, 1, swi_isr, 0);
 	irq_enable(TS_SWI_IRQn);
