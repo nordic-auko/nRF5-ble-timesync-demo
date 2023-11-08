@@ -20,8 +20,8 @@
 #include <hal/nrf_radio.h>
 #include <hal/nrf_timer.h>
 
-#include <drivers/clock_control.h>
-#include <drivers/clock_control/nrf_clock_control.h>
+#include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 
 #include <mpsl_timeslot.h>
 #include <mpsl.h>
@@ -730,7 +730,7 @@ static void timestamp_counter_start(void)
 	// When timestamp API is used, the number of overflows/resets + current value of sync timer must be added up to give accurate timestamp information
 	nrf_timer_task_trigger(COUNTER_TIMER, NRF_TIMER_TASK_STOP);
 	nrf_timer_task_trigger(COUNTER_TIMER, NRF_TIMER_TASK_CLEAR);
-	nrf_timer_frequency_set(COUNTER_TIMER, NRF_TIMER_FREQ_16MHz);
+	nrf_timer_prescaler_set(COUNTER_TIMER, NRF_TIMER_FREQ_16MHz);
 	nrf_timer_mode_set(COUNTER_TIMER, NRF_TIMER_MODE_COUNTER);
 	nrf_timer_bit_width_set(COUNTER_TIMER, NRF_TIMER_BIT_WIDTH_32);
 	nrf_timer_task_trigger(COUNTER_TIMER, NRF_TIMER_TASK_START);
@@ -743,7 +743,7 @@ static void sync_timer_start(void)
 	// The timing slave(s) adjusts this timer whenever a sync packet is received and the logic determines that there is
 	nrf_timer_task_trigger(FREEWHEEL_TIMER, NRF_TIMER_TASK_STOP);
 	nrf_timer_task_trigger(FREEWHEEL_TIMER, NRF_TIMER_TASK_CLEAR);
-	nrf_timer_frequency_set(FREEWHEEL_TIMER, NRF_TIMER_FREQ_16MHz);
+	nrf_timer_prescaler_set(FREEWHEEL_TIMER, NRF_TIMER_FREQ_16MHz);
 	nrf_timer_mode_set(FREEWHEEL_TIMER, NRF_TIMER_MODE_TIMER);
 	nrf_timer_bit_width_set(FREEWHEEL_TIMER, NRF_TIMER_BIT_WIDTH_32);
 	nrf_timer_cc_set(FREEWHEEL_TIMER, NRF_TIMER_CC_CHANNEL0, TIME_SYNC_TIMER_MAX_VAL);

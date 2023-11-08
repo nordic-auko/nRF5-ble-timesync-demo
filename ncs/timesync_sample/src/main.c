@@ -13,7 +13,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 
-#include <shell/shell.h>
+#include <zephyr/shell/shell.h>
 
 #include <bluetooth/services/nus.h>
 
@@ -79,7 +79,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-	LOG_INF("Connected %s", log_strdup(addr));
+	LOG_INF("Connected %s", addr);
 
 	current_conn = bt_conn_ref(conn);
 }
@@ -90,7 +90,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-	LOG_INF("Disconnected: %s (reason %u)", log_strdup(addr), reason);
+	LOG_INF("Disconnected: %s (reason %u)", addr, reason);
 
 	if (auth_conn) {
 		bt_conn_unref(auth_conn);
@@ -115,7 +115,7 @@ static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, ARRAY_SIZE(addr));
 
-	LOG_INF("Received %d bytes from: %s", len, log_strdup(addr));
+	LOG_INF("Received %d bytes from: %s", len, addr);
 }
 
 static struct bt_nus_cb nus_cb = {
@@ -167,7 +167,7 @@ static void ts_gpio_trigger_enable(void)
     time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (1000 * 2);
     time_target = (time_target / 1000) * 1000;
 
-    err = ts_set_trigger(time_target, nrfx_gpiote_out_task_addr_get(syncpin_absval));
+    err = ts_set_trigger(time_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
 	__ASSERT_NO_MSG(err == 0);
 
     nrfx_gpiote_set_task_trigger(syncpin_absval);
@@ -197,7 +197,7 @@ static void ts_event_handler(const ts_evt_t* evt)
 
                 tick_target = evt->params.triggered.tick_target + 1;
 
-                int err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_addr_get(syncpin_absval));
+                int err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
                 __ASSERT_NO_MSG(err == 0);
             }
             else
@@ -278,9 +278,9 @@ static void configure_debug_gpio(void)
 		.init_val = NRF_GPIOTE_INITIAL_VALUE_LOW,
 	};
 
-	if (syncpin.port == device_get_binding("GPIO_0")) {
+	if (syncpin.port == device_get_binding("gpio@50000000")) {
 		syncpin_absval = NRF_GPIO_PIN_MAP(0, syncpin.pin);
-	} else if (syncpin.port == device_get_binding("GPIO_1"))
+	} else if (syncpin.port == device_get_binding("gpio@50000300"))
 		syncpin_absval = NRF_GPIO_PIN_MAP(1, syncpin.pin);
 	else {
 		__ASSERT_NO_MSG(false);
@@ -304,7 +304,7 @@ static void configure_debug_gpio(void)
 	nrfx_gpiote_out_task_enable(syncpin_absval);
 }
 
-void main(void)
+int main(void)
 {
 	int err = 0;
 
