@@ -5,6 +5,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/device.h>
 #include <zephyr/types.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/usb/usb_device.h>
@@ -261,6 +262,20 @@ static void configure_sync_timer(void)
 	__ASSERT_NO_MSG(err == 0);
 }
 
+static nrfx_gpiote_pin_t pin_absval_get(const struct gpio_dt_spec *gpio_spec)
+{
+	if (gpio_spec->port == DEVICE_DT_GET(DT_NODELABEL(gpio0))) {
+		return NRF_GPIO_PIN_MAP(0, gpio_spec->pin);
+	}
+#if DT_NODE_EXISTS(gpio1)
+	if (gpio_spec->port == DEVICE_DT_GET(DT_NODELABEL(gpio1))) {
+		return NRF_GPIO_PIN_MAP(1, gpio_spec->pin);
+	}
+#endif
+
+	__ASSERT(false, "Port could not be established");
+}
+
 static void configure_debug_gpio(void)
 {
 	nrfx_err_t nrfx_err;
@@ -278,14 +293,7 @@ static void configure_debug_gpio(void)
 		.init_val = NRF_GPIOTE_INITIAL_VALUE_LOW,
 	};
 
-	if (syncpin.port == device_get_binding("gpio@50000000")) {
-		syncpin_absval = NRF_GPIO_PIN_MAP(0, syncpin.pin);
-	} else if (syncpin.port == device_get_binding("gpio@50000300"))
-		syncpin_absval = NRF_GPIO_PIN_MAP(1, syncpin.pin);
-	else {
-		__ASSERT_NO_MSG(false);
-		return;
-	}
+	syncpin_absval = pin_absval_get(&syncpin);
 
 	err = gpio_pin_configure_dt(&syncpin, GPIO_OUTPUT_LOW | syncpin.dt_flags);
 	__ASSERT_NO_MSG(err == 0);
@@ -328,14 +336,14 @@ int main(void)
 	err = bt_nus_init(&nus_cb);
 	if (err) {
 		LOG_ERR("Failed to initialize UART service (err: %d)", err);
-		return;
+		return 0;
 	}
 
 	err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd,
 				  ARRAY_SIZE(sd));
 	if (err) {
 		LOG_ERR("Advertising failed to start (err %d)", err);
-		return;
+		return 0;
 	}
 }
 

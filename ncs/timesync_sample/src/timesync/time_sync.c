@@ -1148,7 +1148,7 @@ int ts_enable(const ts_rf_config_t* p_rf_config)
 {
 	int err;
 
-	if (p_rf_config == NULL || p_rf_config->rf_addr == NULL)
+	if (p_rf_config == NULL)
 	{
 		return -EINVAL;
 	}
