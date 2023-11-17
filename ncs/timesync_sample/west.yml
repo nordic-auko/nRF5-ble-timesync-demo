@@ -17,7 +17,7 @@ manifest:
   projects:
     - name: zephyr
       repo-path: sdk-zephyr
-      revision: v3.0.99-ncs1-1
+      revision: v3.4.99-ncs1
       import:
         # In addition to the zephyr repository itself, NCS also
         # imports the contents of zephyr/west.yml at the above
@@ -40,17 +40,17 @@ manifest:
     - name: sdk-nrf
       repo-path: sdk-nrf
       path: nrf
-      revision: v2.0.2
+      revision: v2.5.0
       import: false
     - name: nrfxlib
       repo-path: sdk-nrfxlib
       path: nrfxlib
-      revision: v2.0.2
-    - name: mbedtls-nrf
-      path: mbedtls
+      revision: v2.5.0
+    - name: mbedtls
+      path: modules/crypto/mbedtls
       repo-path: sdk-mbedtls
-      revision: v3.0.0-ncs2
+      revision: v3.3.0-ncs2
     - name: trusted-firmware-m
       repo-path: sdk-trusted-firmware-m
       path: modules/tee/tf-m/trusted-firmware-m
-      revision: v1.5.0-ncs2
+      revision: v1.8.0-ncs1
