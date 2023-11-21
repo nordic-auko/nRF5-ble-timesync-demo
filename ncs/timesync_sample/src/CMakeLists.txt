@@ -6,7 +6,6 @@
 
 target_sources(app PRIVATE
   main.c
-  timesync/time_sync.c
 )
 
-zephyr_library_include_directories(timesync)
+add_subdirectory(timesync)

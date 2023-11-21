@@ -172,6 +172,7 @@ int ts_tx_start(uint32_t sync_freq_hz);
  */
 int ts_tx_stop(void);
 
+#if !defined(DPPI_PRESENT)
 /**@brief Trigger PPI endpoint at given tick
  *
  * @details Time unit is given by @ref TIME_SYNC_TIMER_MAX_VAL.
@@ -191,8 +192,29 @@ int ts_tx_stop(void);
  * @return 0 or error value
  */
 int ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint);
+#else
+/**@brief Trigger DPPI channel at given tick
+ *
+ * @details Time unit is given by @ref TIME_SYNC_TIMER_MAX_VAL.
+ *          Conversion is as follows:
+ *          Time in milliseconds = target_tick * 16000000 / (TIME_SYNC_TIMER_MAX_VAL * 1000)
+ *
+ * @note When @ref ts_timestamp_get_ticks_u64 or @ref ts_timestamp_get_ticks_u32 is used as a reference,
+ *       use @ref TIME_SYNC_TIMESTAMP_TO_TICK to convert to time unit for this function.
+ *
+ * @note Time sync receivers will adjust their local time according to the timing transmitter.
+ *       If a trigger is set before a receiver is in sync with the transmitter, the local receiver timebase can skip ahead of the trigger time,
+ *       causing the trigger to never occur.
+ *
+ * @param[in] target_tick  Time that PPI endpoint should be triggered.
+ * @param[in] dppi_channel DPPI channel to trigger.
+ *
+ * @return 0 or error value
+ */
+int ts_set_trigger(uint32_t target_tick, uint8_t dppi_channel);
+#endif
 
-
+#if !defined(DPPI_PRESENT)
 /**@brief Configure timestamp triggering from PPI event endpoint
  *
  * @details When configured, this PPI Event Endpoint will capture current timestamp value and generate @ref TS_EVT_TIMESTAMP event.
@@ -204,6 +226,17 @@ int ts_set_trigger(uint32_t target_tick, uint32_t ppi_endpoint);
  * @return 0 or error value
  */
 int ts_set_timestamp_trigger(uint32_t ppi_event_endpoint);
+#else
+/**@brief Configure timestamp triggering from DPPI channel
+ *
+ * @details When configured, this DPPI channel will capture current timestamp value and generate @ref TS_EVT_TIMESTAMP event.
+ *
+ * @param[in] dppi_channel Address of DPPI channel that should capture timestamp
+ *
+ * @return 0 or error value
+ */
+int ts_set_timestamp_trigger(uint8_t dppi_channel);
+#endif
 
 /**@brief Get timestamp value in 16 MHz ticks
  *

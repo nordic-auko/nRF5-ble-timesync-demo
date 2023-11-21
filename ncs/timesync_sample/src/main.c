@@ -68,6 +68,10 @@ static const struct bt_data sd[] = {
 static const struct gpio_dt_spec syncpin = GPIO_DT_SPEC_GET(DT_ALIAS(syncpin), gpios);
 static nrfx_gpiote_pin_t syncpin_absval;
 
+#if defined(DPPI_PRESENT)
+static uint8_t dppi_channel_syncpin;
+#endif
+
 static void button_changed(uint32_t button_state, uint32_t has_changed);
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -150,67 +154,85 @@ static void configure_gpio(void)
 
 static void ts_gpio_trigger_enable(void)
 {
-    uint64_t time_now_ticks;
-    uint32_t time_now_msec;
-    uint32_t time_target;
-    int err;
+	uint64_t time_now_ticks;
+	uint32_t time_now_msec;
+	uint32_t time_target;
+	int err;
 
-    if (m_gpio_trigger_enabled) {
-        return;
-    }
+	if (m_gpio_trigger_enabled) {
+		return;
+	}
 
-    // Round up to nearest second to next 1000 ms to start toggling.
-    // If the receiver has received a valid sync packet within this time, the GPIO toggling polarity will be the same.
+	// Round up to nearest second to next 1000 ms to start toggling.
+	// If the receiver has received a valid sync packet within this time, the GPIO toggling polarity will be the same.
 
-    time_now_ticks = ts_timestamp_get_ticks_u64();
-    time_now_msec = TIME_SYNC_TIMESTAMP_TO_USEC(time_now_ticks) / 1000;
+	time_now_ticks = ts_timestamp_get_ticks_u64();
+	time_now_msec = TIME_SYNC_TIMESTAMP_TO_USEC(time_now_ticks) / 1000;
 
-    time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (1000 * 2);
-    time_target = (time_target / 1000) * 1000;
+	time_target = TIME_SYNC_MSEC_TO_TICK(time_now_msec) + (1000 * 2);
+	time_target = (time_target / 1000) * 1000;
 
-    err = ts_set_trigger(time_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
+#if defined(DPPI_PRESENT)
+	err = ts_set_trigger(time_target, dppi_channel_syncpin);
 	__ASSERT_NO_MSG(err == 0);
+#else
+	err = ts_set_trigger(time_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
+	__ASSERT_NO_MSG(err == 0);
+#endif
 
-    nrfx_gpiote_set_task_trigger(syncpin_absval);
+	nrfx_gpiote_set_task_trigger(syncpin_absval);
 
-    m_gpio_trigger_enabled = true;
+	m_gpio_trigger_enabled = true;
 }
 
 static void ts_gpio_trigger_disable(void)
 {
-    m_gpio_trigger_enabled = false;
+	m_gpio_trigger_enabled = false;
 }
 
 static void ts_event_handler(const ts_evt_t* evt)
 {
-    switch (evt->type)
-    {
-        case TS_EVT_SYNCHRONIZED:
-            ts_gpio_trigger_enable();
-            break;
-        case TS_EVT_DESYNCHRONIZED:
-            ts_gpio_trigger_disable();
-            break;
-        case TS_EVT_TRIGGERED:
-            if (m_gpio_trigger_enabled)
-            {
-                uint32_t tick_target;
+	switch (evt->type)
+	{
+		case TS_EVT_SYNCHRONIZED:
+			ts_gpio_trigger_enable();
+			LOG_INF("TS_EVT_SYNCHRONIZED");
+			break;
+		case TS_EVT_DESYNCHRONIZED:
+			ts_gpio_trigger_disable();
+			LOG_INF("TS_EVT_DESYNCHRONIZED");
+			break;
+		case TS_EVT_TRIGGERED:
+			if (m_gpio_trigger_enabled)
+			{
+				uint32_t tick_target;
+				int err;
 
-                tick_target = evt->params.triggered.tick_target + 1;
+				/* Small increments here are more sensitive to drift.
+				 * That is, an update from the timing transmitter that causes a jump larger than the
+				 * chosen increment, risk having a trigger target_tick that is in the past.
+				 */
+				tick_target = evt->params.triggered.tick_target + 2;
 
-                int err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
-                __ASSERT_NO_MSG(err == 0);
-            }
-            else
-            {
-                // Ensure pin is low when triggering is stopped
+#if defined(DPPI_PRESENT)
+				err = ts_set_trigger(tick_target, dppi_channel_syncpin);
+				__ASSERT_NO_MSG(err == 0);
+#else
+				err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
+				__ASSERT_NO_MSG(err == 0);
+#endif
+
+			}
+			else
+			{
+				// Ensure pin is low when triggering is stopped
 				nrfx_gpiote_clr_task_trigger(syncpin_absval);
-            }
-            break;
-        default:
-            __ASSERT_NO_MSG(false);
-            break;
-    }
+			}
+			break;
+		default:
+			__ASSERT_NO_MSG(false);
+			break;
+	}
 }
 
 
@@ -267,13 +289,14 @@ static nrfx_gpiote_pin_t pin_absval_get(const struct gpio_dt_spec *gpio_spec)
 	if (gpio_spec->port == DEVICE_DT_GET(DT_NODELABEL(gpio0))) {
 		return NRF_GPIO_PIN_MAP(0, gpio_spec->pin);
 	}
-#if DT_NODE_EXISTS(gpio1)
+#if DT_NODE_EXISTS(DT_NODELABEL(gpio1))
 	if (gpio_spec->port == DEVICE_DT_GET(DT_NODELABEL(gpio1))) {
 		return NRF_GPIO_PIN_MAP(1, gpio_spec->pin);
 	}
 #endif
 
-	__ASSERT(false, "Port could not be established");
+	__ASSERT(false, "Port could not be determined");
+	return 0;
 }
 
 static void configure_debug_gpio(void)
@@ -310,6 +333,16 @@ static void configure_debug_gpio(void)
 	__ASSERT_NO_MSG(nrfx_err == NRFX_SUCCESS);
 
 	nrfx_gpiote_out_task_enable(syncpin_absval);
+
+#if defined(DPPI_PRESENT)
+	nrfx_err = nrfx_dppi_channel_alloc(&dppi_channel_syncpin);
+	__ASSERT_NO_MSG(nrfx_err == NRFX_SUCCESS);
+
+	nrf_gpiote_subscribe_set(
+		NRF_GPIOTE, nrfx_gpiote_out_task_get(syncpin_absval), dppi_channel_syncpin);
+
+	nrf_dppi_channels_enable(NRF_DPPIC_NS, BIT(dppi_channel_syncpin));
+#endif
 }
 
 int main(void)
@@ -380,6 +413,22 @@ static int cmd_tx_toggle(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_time_get(const struct shell *sh, size_t argc, char **argv)
+{
+	uint64_t timestamp_ticks;
+	uint32_t timestamp_msec;
+
+	timestamp_ticks = ts_timestamp_get_ticks_u64();
+	timestamp_msec = TIME_SYNC_TIMESTAMP_TO_USEC(timestamp_ticks) / 1000;
+
+	shell_print(sh, "%d msec", timestamp_msec);
+
+	return 0;
+}
+
 SHELL_CMD_ARG_REGISTER(tx_toggle, NULL, "Time sync TX toggle",
 			   cmd_tx_toggle, 0, 0);
+
+SHELL_CMD_ARG_REGISTER(time_get, NULL, "Time sync time get",
+			   cmd_time_get, 0, 0);
 #endif /* CONFIG_SHELL*/

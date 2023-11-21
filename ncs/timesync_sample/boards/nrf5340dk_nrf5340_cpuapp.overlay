@@ -1,0 +1,13 @@
+gpio_fwd: nrf-gpio-forwarder {
+    compatible = "nordic,nrf-gpio-forwarder";
+    status = "okay";
+    sync-pin {
+        gpios = <&gpio1 14 0>;
+    };
+    buttons {
+        gpios = <&gpio0 23 0>, <&gpio0 24 0>, <&gpio0 8 0>, <&gpio0 9 0>;
+    };
+    leds {
+        gpios = <&gpio0 28 0>, <&gpio0 29 0>, <&gpio0 30 0>, <&gpio0 31 0>;
+    };
+};
