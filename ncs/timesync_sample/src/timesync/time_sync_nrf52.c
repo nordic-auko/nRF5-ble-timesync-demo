@@ -1073,6 +1073,7 @@ static void timers_capture(uint32_t * p_sync_timer_val, uint32_t * p_count_timer
 	nrf_ppi_channel_t ppi_chn;
 	nrfx_err_t ret = nrfx_ppi_channel_alloc(&ppi_chn);
 	__ASSERT_NO_MSG(ret == NRFX_SUCCESS);
+	(void)ret; /* If CONFIG_ASSERT is not set, ret is unused. */
 
 	ppi_counter_timer_capture_configure(ppi_chn);
 
