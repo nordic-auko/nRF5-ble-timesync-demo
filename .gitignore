@@ -1,3 +1,9 @@
 **/*build
 **/*_build
 **/*.vscode
+**/*.venv
+/ncs/.west/
+/ncs/zephyr/
+/ncs/modules/
+/ncs/nrf/
+/ncs/nrfxlib/
