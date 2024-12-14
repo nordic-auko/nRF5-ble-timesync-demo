@@ -65,6 +65,7 @@ static const struct bt_data sd[] = {
 	BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_VAL),
 };
 
+static const nrfx_gpiote_t gpiote_inst = NRFX_GPIOTE_INSTANCE(NRF_DT_GPIOTE_INST(DT_ALIAS(syncpin), gpios));
 static const struct gpio_dt_spec syncpin = GPIO_DT_SPEC_GET(DT_ALIAS(syncpin), gpios);
 static nrfx_gpiote_pin_t syncpin_absval;
 
@@ -176,11 +177,11 @@ static void ts_gpio_trigger_enable(void)
 	err = ts_set_trigger(time_target, dppi_channel_syncpin);
 	__ASSERT_NO_MSG(err == 0);
 #else
-	err = ts_set_trigger(time_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
+	err = ts_set_trigger(time_target, nrfx_gpiote_out_task_address_get(&gpiote_inst, syncpin_absval));
 	__ASSERT_NO_MSG(err == 0);
 #endif
 
-	nrfx_gpiote_set_task_trigger(syncpin_absval);
+	nrfx_gpiote_set_task_trigger(&gpiote_inst, syncpin_absval);
 
 	m_gpio_trigger_enabled = true;
 }
@@ -218,7 +219,7 @@ static void ts_event_handler(const ts_evt_t* evt)
 				err = ts_set_trigger(tick_target, dppi_channel_syncpin);
 				__ASSERT_NO_MSG(err == 0);
 #else
-				err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_address_get(syncpin_absval));
+				err = ts_set_trigger(tick_target, nrfx_gpiote_out_task_address_get(&gpiote_inst, syncpin_absval));
 				__ASSERT_NO_MSG(err == 0);
 #endif
 
@@ -226,7 +227,7 @@ static void ts_event_handler(const ts_evt_t* evt)
 			else
 			{
 				// Ensure pin is low when triggering is stopped
-				nrfx_gpiote_clr_task_trigger(syncpin_absval);
+				nrfx_gpiote_clr_task_trigger(&gpiote_inst, syncpin_absval);
 			}
 			break;
 		default:
@@ -321,18 +322,18 @@ static void configure_debug_gpio(void)
 	err = gpio_pin_configure_dt(&syncpin, GPIO_OUTPUT_LOW | syncpin.dt_flags);
 	__ASSERT_NO_MSG(err == 0);
 
-	if (!nrfx_gpiote_is_init()) {
-		nrfx_err = nrfx_gpiote_init(5);
+	if (!nrfx_gpiote_init_check(&gpiote_inst)) {
+		nrfx_err = nrfx_gpiote_init(&gpiote_inst, 5);
 		__ASSERT_NO_MSG(nrfx_err == NRFX_SUCCESS);
 	}
 
-	nrfx_err = nrfx_gpiote_channel_alloc(&task_cfg.task_ch);
+	nrfx_err = nrfx_gpiote_channel_alloc(&gpiote_inst, &task_cfg.task_ch);
 	__ASSERT_NO_MSG(nrfx_err == NRFX_SUCCESS);
 
-	nrfx_err = nrfx_gpiote_output_configure(syncpin_absval, &gpiote_cfg, &task_cfg);
+	nrfx_err = nrfx_gpiote_output_configure(&gpiote_inst, syncpin_absval, &gpiote_cfg, &task_cfg);
 	__ASSERT_NO_MSG(nrfx_err == NRFX_SUCCESS);
 
-	nrfx_gpiote_out_task_enable(syncpin_absval);
+	nrfx_gpiote_out_task_enable(&gpiote_inst, syncpin_absval);
 
 #if defined(DPPI_PRESENT)
 	nrfx_err = nrfx_dppi_channel_alloc(&dppi_channel_syncpin);
